@@ -116,6 +116,22 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	return inbound, nil
 }
 
+// UpdateUsers replaces the running inbound's user set at runtime without
+// restarting the core, mirroring what NewInbound does at start-up. Invoked from
+// the clash API to make Trojan user changes hot-reloadable.
+func (h *Inbound) UpdateUsers(users []option.TrojanUser) error {
+	err := h.service.UpdateUsers(common.MapIndexed(users, func(index int, it option.TrojanUser) int {
+		return index
+	}), common.Map(users, func(it option.TrojanUser) string {
+		return it.Password
+	}))
+	if err != nil {
+		return err
+	}
+	h.users = users
+	return nil
+}
+
 func (h *Inbound) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateStart {
 		return nil

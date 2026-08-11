@@ -100,6 +100,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	return inbound, nil
 }
 
+// UpdateUsers replaces the running inbound's user set at runtime without
+// restarting the core, mirroring what NewInbound does at start-up. Invoked from
+// the clash API to make VMess user changes hot-reloadable.
+func (h *Inbound) UpdateUsers(users []option.VMessUser) error {
+	err := h.service.UpdateUsers(common.MapIndexed(users, func(index int, it option.VMessUser) int {
+		return index
+	}), common.Map(users, func(it option.VMessUser) string {
+		return it.UUID
+	}), common.Map(users, func(it option.VMessUser) int {
+		return it.AlterId
+	}))
+	if err != nil {
+		return err
+	}
+	h.users = users
+	return nil
+}
+
 func (h *Inbound) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateStart {
 		return nil

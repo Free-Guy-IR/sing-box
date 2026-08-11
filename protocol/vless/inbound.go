@@ -98,6 +98,21 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	return inbound, nil
 }
 
+// UpdateUsers replaces the running inbound's user set at runtime without
+// restarting the core, mirroring what NewInbound does at start-up. Invoked from
+// the clash API to make VLESS user changes hot-reloadable.
+func (h *Inbound) UpdateUsers(users []option.VLESSUser) error {
+	h.service.UpdateUsers(common.MapIndexed(users, func(index int, _ option.VLESSUser) int {
+		return index
+	}), common.Map(users, func(it option.VLESSUser) string {
+		return it.UUID
+	}), common.Map(users, func(it option.VLESSUser) string {
+		return it.Flow
+	}))
+	h.users = users
+	return nil
+}
+
 func (h *Inbound) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateStart {
 		return nil

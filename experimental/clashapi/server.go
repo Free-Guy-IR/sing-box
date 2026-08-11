@@ -121,6 +121,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		r.Get("/traffic", traffic(s.ctx, trafficManager))
 		r.Get("/version", version)
 		r.Mount("/hysteria2", hysteria2UserRouter(s))
+		r.Mount("/inbounds", inboundUsersRouter(s))
 		r.Mount("/configs", configRouter(s, logFactory))
 		r.Mount("/proxies", proxyRouter(s, s.router))
 		r.Mount("/rules", ruleRouter(s.router))
