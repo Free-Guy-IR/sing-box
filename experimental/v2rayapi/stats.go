@@ -68,7 +68,13 @@ func (s *StatsService) RoutedConnection(ctx context.Context, conn net.Conn, meta
 	var writeCounter []*atomic.Int64
 	countInbound := inbound != "" && s.inbounds[inbound]
 	countOutbound := outbound != "" && s.outbounds[outbound]
-	countUser := user != "" && s.users[user]
+	// Count every authenticated user, not only those in the frozen start-time
+	// stats.users list. Users added at runtime via the clash_api hot-reload
+	// endpoint are not in that list, so gating on s.users[user] would leave
+	// their traffic uncounted until the next core restart. metadata.User is
+	// only set for real authenticated proxy users, so this creates no spurious
+	// counters; s.users is retained for any pre-registration use.
+	countUser := user != ""
 	if !countInbound && !countOutbound && !countUser {
 		return conn
 	}
@@ -97,7 +103,13 @@ func (s *StatsService) RoutedPacketConnection(ctx context.Context, conn N.Packet
 	var writeCounter []*atomic.Int64
 	countInbound := inbound != "" && s.inbounds[inbound]
 	countOutbound := outbound != "" && s.outbounds[outbound]
-	countUser := user != "" && s.users[user]
+	// Count every authenticated user, not only those in the frozen start-time
+	// stats.users list. Users added at runtime via the clash_api hot-reload
+	// endpoint are not in that list, so gating on s.users[user] would leave
+	// their traffic uncounted until the next core restart. metadata.User is
+	// only set for real authenticated proxy users, so this creates no spurious
+	// counters; s.users is retained for any pre-registration use.
+	countUser := user != ""
 	if !countInbound && !countOutbound && !countUser {
 		return conn
 	}
