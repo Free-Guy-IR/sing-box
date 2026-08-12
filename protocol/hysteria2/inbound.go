@@ -34,8 +34,7 @@ type Inbound struct {
 	logger       log.ContextLogger
 	listener     *listener.Listener
 	tlsConfig    tls.ServerConfig
-	service      *hysteria2.Service[int]
-	userNameList []string
+	service      *hysteria2.Service[string]
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.Hysteria2InboundOptions) (adapter.Inbound, error) {
@@ -113,7 +112,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	} else {
 		udpTimeout = C.UDPTimeout
 	}
-	service, err := hysteria2.NewService[int](hysteria2.ServiceOptions{
+	service, err := hysteria2.NewService[string](hysteria2.ServiceOptions{
 		Context:               ctx,
 		Logger:                logger,
 		BrutalDebug:           options.BrutalDebug,
@@ -129,17 +128,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, err
 	}
-	userList := make([]int, 0, len(options.Users))
-	userNameList := make([]string, 0, len(options.Users))
+	userList := make([]string, 0, len(options.Users))
 	userPasswordList := make([]string, 0, len(options.Users))
-	for index, user := range options.Users {
-		userList = append(userList, index)
-		userNameList = append(userNameList, user.Name)
+	for _, user := range options.Users {
+		userList = append(userList, user.Name)
 		userPasswordList = append(userPasswordList, user.Password)
 	}
 	service.UpdateUsers(userList, userPasswordList)
 	inbound.service = service
-	inbound.userNameList = userNameList
 	return inbound, nil
 }
 
@@ -148,16 +144,13 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // makes Hysteria2 user changes hot-reloadable (like Xray's HandlerService)
 // rather than requiring a full sing-box restart. Invoked from the clash API.
 func (h *Inbound) UpdateUsers(users []option.Hysteria2User) error {
-	userList := make([]int, 0, len(users))
-	userNameList := make([]string, 0, len(users))
+	userList := make([]string, 0, len(users))
 	userPasswordList := make([]string, 0, len(users))
-	for index, user := range users {
-		userList = append(userList, index)
-		userNameList = append(userNameList, user.Name)
+	for _, user := range users {
+		userList = append(userList, user.Name)
 		userPasswordList = append(userPasswordList, user.Password)
 	}
 	h.service.UpdateUsers(userList, userPasswordList)
-	h.userNameList = userNameList
 	return nil
 }
 
@@ -173,8 +166,8 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
-	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userNameList[userID]; userName != "" {
+	userName, _ := auth.UserFromContext[string](ctx)
+	if userName != "" {
 		metadata.User = userName
 		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
 	} else {
@@ -195,8 +188,8 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
-	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userNameList[userID]; userName != "" {
+	userName, _ := auth.UserFromContext[string](ctx)
+	if userName != "" {
 		metadata.User = userName
 		h.logger.InfoContext(ctx, "[", userName, "] inbound packet connection to ", metadata.Destination)
 	} else {
