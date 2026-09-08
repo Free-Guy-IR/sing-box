@@ -147,6 +147,7 @@ func (s *Service[U]) removeSession(session *serverSession[U]) {
 }
 
 func (s *Service[U]) Start(conn net.PacketConn) error {
+	setUDPSocketBuffers(conn, s.logger)
 	if s.salamanderPassword != "" {
 		conn = NewSalamanderConn(conn, []byte(s.salamanderPassword))
 	}
