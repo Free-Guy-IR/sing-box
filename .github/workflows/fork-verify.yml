@@ -1,0 +1,58 @@
+name: Fork Verify
+
+on:
+  push:
+    branches:
+      - 'v1.*-hotreload'
+  pull_request:
+    branches:
+      - 'v1.*-hotreload'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SINGBOX_TAGS: with_quic,with_utls,with_clash_api,with_v2ray_api
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build -trimpath -tags "${SINGBOX_TAGS}" ./...
+
+  test:
+    name: Test with the race detector
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet -tags "${SINGBOX_TAGS}" ./...
+      - name: Test
+        run: go test -race -tags "${SINGBOX_TAGS}" ./common/inbounduser/... ./protocol/... ./transport/...
