@@ -7,6 +7,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/common/inbounduser"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/common/uot"
@@ -29,12 +30,11 @@ func RegisterInbound(registry *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	router       adapter.ConnectionRouterEx
-	logger       log.ContextLogger
-	listener     *listener.Listener
-	tlsConfig    tls.ServerConfig
-	server       *tuic.Service[int]
-	userNameList []string
+	router    adapter.ConnectionRouterEx
+	logger    log.ContextLogger
+	listener  *listener.Listener
+	tlsConfig tls.ServerConfig
+	server    *tuic.Service[inbounduser.Identity]
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TUICInboundOptions) (adapter.Inbound, error) {
@@ -63,7 +63,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	} else {
 		udpTimeout = C.UDPTimeout
 	}
-	service, err := tuic.NewService[int](tuic.ServiceOptions{
+	service, err := tuic.NewService[inbounduser.Identity](tuic.ServiceOptions{
 		Context:           ctx,
 		Logger:            logger,
 		TLSConfig:         tlsConfig,
@@ -77,52 +77,40 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, err
 	}
-	var userList []int
-	var userNameList []string
-	var userUUIDList [][16]byte
-	var userPasswordList []string
-	for index, user := range options.Users {
-		if user.UUID == "" {
-			return nil, E.New("missing uuid for user ", index)
-		}
-		userUUID, err := uuid.FromString(user.UUID)
-		if err != nil {
-			return nil, E.Cause(err, "invalid uuid for user ", index)
-		}
-		userList = append(userList, index)
-		userNameList = append(userNameList, user.Name)
-		userUUIDList = append(userUUIDList, userUUID)
-		userPasswordList = append(userPasswordList, user.Password)
+	userList, userUUIDList, userPasswordList, err := tuicUsers(options.Users)
+	if err != nil {
+		return nil, err
 	}
 	service.UpdateUsers(userList, userUUIDList, userPasswordList)
 	inbound.server = service
-	inbound.userNameList = userNameList
 	return inbound, nil
 }
 
-// UpdateUsers replaces the running inbound's user set at runtime without
-// restarting the core, mirroring what NewInbound does at start-up. Invoked from
-// the clash API to make TUIC user changes hot-reloadable.
-func (h *Inbound) UpdateUsers(users []option.TUICUser) error {
-	var userList []int
-	var userNameList []string
-	var userUUIDList [][16]byte
-	var userPasswordList []string
+func tuicUsers(users []option.TUICUser) ([]inbounduser.Identity, [][16]byte, []string, error) {
+	userList := make([]inbounduser.Identity, 0, len(users))
+	userUUIDList := make([][16]byte, 0, len(users))
+	userPasswordList := make([]string, 0, len(users))
 	for index, user := range users {
 		if user.UUID == "" {
-			return E.New("missing uuid for user ", index)
+			return nil, nil, nil, E.New("missing uuid for user ", index)
 		}
 		userUUID, err := uuid.FromString(user.UUID)
 		if err != nil {
-			return E.Cause(err, "invalid uuid for user ", index)
+			return nil, nil, nil, E.Cause(err, "invalid uuid for user ", index)
 		}
-		userList = append(userList, index)
-		userNameList = append(userNameList, user.Name)
+		userList = append(userList, inbounduser.Identity{Name: user.Name, Index: index})
 		userUUIDList = append(userUUIDList, userUUID)
 		userPasswordList = append(userPasswordList, user.Password)
 	}
+	return userList, userUUIDList, userPasswordList, nil
+}
+
+func (h *Inbound) UpdateUsers(users []option.TUICUser) error {
+	userList, userUUIDList, userPasswordList, err := tuicUsers(users)
+	if err != nil {
+		return err
+	}
 	h.server.UpdateUsers(userList, userUUIDList, userPasswordList)
-	h.userNameList = userNameList
 	return nil
 }
 
@@ -138,10 +126,10 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
-	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userNameList[userID]; userName != "" {
-		metadata.User = userName
-		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
+	identity, _ := auth.UserFromContext[inbounduser.Identity](ctx)
+	if identity.Name != "" {
+		metadata.User = identity.Name
+		h.logger.InfoContext(ctx, "[", identity.Name, "] inbound connection to ", metadata.Destination)
 	} else {
 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
 	}
@@ -160,10 +148,10 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	metadata.Source = source
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
-	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userNameList[userID]; userName != "" {
-		metadata.User = userName
-		h.logger.InfoContext(ctx, "[", userName, "] inbound packet connection to ", metadata.Destination)
+	identity, _ := auth.UserFromContext[inbounduser.Identity](ctx)
+	if identity.Name != "" {
+		metadata.User = identity.Name
+		h.logger.InfoContext(ctx, "[", identity.Name, "] inbound packet connection to ", metadata.Destination)
 	} else {
 		h.logger.InfoContext(ctx, "inbound packet connection to ", metadata.Destination)
 	}

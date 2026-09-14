@@ -30,11 +30,11 @@ func RegisterInbound(registry *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	router       adapter.Router
-	logger       log.ContextLogger
-	listener     *listener.Listener
-	tlsConfig    tls.ServerConfig
-	service      *hysteria2.Service[string]
+	router    adapter.Router
+	logger    log.ContextLogger
+	listener  *listener.Listener
+	tlsConfig tls.ServerConfig
+	service   *hysteria2.Service[string]
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.Hysteria2InboundOptions) (adapter.Inbound, error) {
@@ -139,8 +139,6 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	return inbound, nil
 }
 
-// UpdateUsers replaces the running inbound's user set at runtime without
-// restarting the core, mirroring what NewInbound does at start-up. This is what
 // makes Hysteria2 user changes hot-reloadable (like Xray's HandlerService)
 // rather than requiring a full sing-box restart. Invoked from the clash API.
 func (h *Inbound) UpdateUsers(users []option.Hysteria2User) error {
