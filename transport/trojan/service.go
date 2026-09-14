@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"sync"
 
 	"github.com/sagernet/sing/common/auth"
 	"github.com/sagernet/sing/common/buf"
@@ -21,6 +22,7 @@ type Handler interface {
 }
 
 type Service[K comparable] struct {
+	access          sync.RWMutex
 	users           map[K][56]byte
 	keys            map[[56]byte]K
 	handler         Handler
@@ -54,8 +56,10 @@ func (s *Service[K]) UpdateUsers(userList []K, passwordList []string) error {
 		users[user] = key
 		keys[key] = user
 	}
+	s.access.Lock()
 	s.users = users
 	s.keys = keys
+	s.access.Unlock()
 	return nil
 }
 
@@ -68,7 +72,10 @@ func (s *Service[K]) NewConnection(ctx context.Context, conn net.Conn, source M.
 		return s.fallback(ctx, conn, source, key[:n], E.New("bad request size"), onClose)
 	}
 
-	if user, loaded := s.keys[key]; loaded {
+	s.access.RLock()
+	user, loaded := s.keys[key]
+	s.access.RUnlock()
+	if loaded {
 		ctx = auth.ContextWithUser(ctx, user)
 	} else {
 		return s.fallback(ctx, conn, source, key[:], E.New("bad request"), onClose)

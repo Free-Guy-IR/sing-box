@@ -7,6 +7,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/common/inbounduser"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/common/tls"
@@ -21,7 +22,6 @@ import (
 	"github.com/sagernet/sing/common/auth"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
-	F "github.com/sagernet/sing/common/format"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -39,8 +39,7 @@ type Inbound struct {
 	router    adapter.ConnectionRouterEx
 	logger    logger.ContextLogger
 	listener  *listener.Listener
-	users     []option.VLESSUser
-	service   *vless.Service[int]
+	service   *vless.Service[inbounduser.Identity]
 	tlsConfig tls.ServerConfig
 	transport adapter.V2RayServerTransport
 }
@@ -51,19 +50,16 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		ctx:     ctx,
 		router:  uot.NewRouter(router, logger),
 		logger:  logger,
-		users:   options.Users,
 	}
 	var err error
 	inbound.router, err = mux.NewRouterWithOptions(inbound.router, logger, common.PtrValueOrDefault(options.Multiplex))
 	if err != nil {
 		return nil, err
 	}
-	service := vless.NewService[int](logger, adapter.NewUpstreamContextHandlerEx(inbound.newConnectionEx, inbound.newPacketConnectionEx))
-	service.UpdateUsers(common.MapIndexed(inbound.users, func(index int, _ option.VLESSUser) int {
-		return index
-	}), common.Map(inbound.users, func(it option.VLESSUser) string {
+	service := vless.NewService[inbounduser.Identity](logger, adapter.NewUpstreamContextHandlerEx(inbound.newConnectionEx, inbound.newPacketConnectionEx))
+	service.UpdateUsers(vlessIdentities(options.Users), common.Map(options.Users, func(it option.VLESSUser) string {
 		return it.UUID
-	}), common.Map(inbound.users, func(it option.VLESSUser) string {
+	}), common.Map(options.Users, func(it option.VLESSUser) string {
 		return it.Flow
 	}))
 	inbound.service = service
@@ -98,19 +94,19 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	return inbound, nil
 }
 
-// UpdateUsers replaces the running inbound's user set at runtime without
-// restarting the core, mirroring what NewInbound does at start-up. Invoked from
-// the clash API to make VLESS user changes hot-reloadable.
 func (h *Inbound) UpdateUsers(users []option.VLESSUser) error {
-	h.service.UpdateUsers(common.MapIndexed(users, func(index int, _ option.VLESSUser) int {
-		return index
-	}), common.Map(users, func(it option.VLESSUser) string {
+	h.service.UpdateUsers(vlessIdentities(users), common.Map(users, func(it option.VLESSUser) string {
 		return it.UUID
 	}), common.Map(users, func(it option.VLESSUser) string {
 		return it.Flow
 	}))
-	h.users = users
 	return nil
+}
+
+func vlessIdentities(users []option.VLESSUser) []inbounduser.Identity {
+	return inbounduser.Identities(users, func(it option.VLESSUser) string {
+		return it.Name
+	})
 }
 
 func (h *Inbound) Start(stage adapter.StartStage) error {
@@ -182,16 +178,14 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, metadata a
 func (h *Inbound) newConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
-	userIndex, loaded := auth.UserFromContext[int](ctx)
+	identity, loaded := auth.UserFromContext[inbounduser.Identity](ctx)
 	if !loaded {
 		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 		return
 	}
-	user := h.users[userIndex].Name
-	if user == "" {
-		user = F.ToString(userIndex)
-	} else {
-		metadata.User = user
+	user := identity.Label()
+	if identity.Name != "" {
+		metadata.User = identity.Name
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound connection to ", metadata.Destination)
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
@@ -200,16 +194,14 @@ func (h *Inbound) newConnectionEx(ctx context.Context, conn net.Conn, metadata a
 func (h *Inbound) newPacketConnectionEx(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.Inbound = h.Tag()
 	metadata.InboundType = h.Type()
-	userIndex, loaded := auth.UserFromContext[int](ctx)
+	identity, loaded := auth.UserFromContext[inbounduser.Identity](ctx)
 	if !loaded {
 		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 		return
 	}
-	user := h.users[userIndex].Name
-	if user == "" {
-		user = F.ToString(userIndex)
-	} else {
-		metadata.User = user
+	user := identity.Label()
+	if identity.Name != "" {
+		metadata.User = identity.Name
 	}
 	if metadata.Destination.Fqdn == packetaddr.SeqPacketMagicAddress {
 		metadata.Destination = M.Socksaddr{}

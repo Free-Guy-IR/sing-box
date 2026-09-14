@@ -49,12 +49,15 @@ type Service[U comparable] struct {
 	tlsConfig         aTLS.ServerConfig
 	heartbeat         time.Duration
 	quicConfig        *quic.Config
+	userAccess        sync.RWMutex
 	userMap           map[[16]byte]U
 	passwordMap       map[U]string
 	congestionControl string
 	authTimeout       time.Duration
 	udpTimeout        time.Duration
 	handler           ServiceHandler
+	sessionAccess     sync.Mutex
+	sessions          map[*serverSession[U]]struct{}
 
 	quicListener io.Closer
 }
@@ -92,6 +95,7 @@ func NewService[U comparable](options ServiceOptions) (*Service[U], error) {
 		authTimeout:       options.AuthTimeout,
 		udpTimeout:        options.UDPTimeout,
 		handler:           options.Handler,
+		sessions:          make(map[*serverSession[U]]struct{}),
 	}, nil
 }
 
@@ -102,8 +106,36 @@ func (s *Service[U]) UpdateUsers(userList []U, uuidList [][16]byte, passwordList
 		userMap[uuidList[index]] = userList[index]
 		passwordMap[userList[index]] = passwordList[index]
 	}
+	s.userAccess.Lock()
 	s.userMap = userMap
 	s.passwordMap = passwordMap
+	s.userAccess.Unlock()
+	var stale []*serverSession[U]
+	s.sessionAccess.Lock()
+	for session := range s.sessions {
+		if !session.authSet {
+			continue
+		}
+		if _, loaded := userMap[session.authUUID]; !loaded {
+			stale = append(stale, session)
+		}
+	}
+	s.sessionAccess.Unlock()
+	for _, session := range stale {
+		session.closeWithError(E.New("user removed"))
+	}
+}
+
+func (s *Service[U]) addSession(session *serverSession[U]) {
+	s.sessionAccess.Lock()
+	s.sessions[session] = struct{}{}
+	s.sessionAccess.Unlock()
+}
+
+func (s *Service[U]) removeSession(session *serverSession[U]) {
+	s.sessionAccess.Lock()
+	delete(s.sessions, session)
+	s.sessionAccess.Unlock()
 }
 
 func (s *Service[U]) Start(conn net.PacketConn) error {
@@ -167,6 +199,11 @@ func (s *Service[U]) handleConnection(connection *quic.Conn) {
 		authDone:   make(chan struct{}),
 		udpConnMap: make(map[uint16]*udpPacketConn),
 	}
+	s.addSession(session)
+	go func() {
+		<-connection.Context().Done()
+		s.removeSession(session)
+	}()
 	session.handle()
 }
 
@@ -179,6 +216,8 @@ type serverSession[U comparable] struct {
 	connErr    error
 	authDone   chan struct{}
 	authUser   U
+	authUUID   [16]byte
+	authSet    bool
 	udpAccess  sync.RWMutex
 	udpConnMap map[uint16]*udpPacketConn
 }
@@ -243,12 +282,15 @@ func (s *serverSession[U]) handleUniStream(stream *quic.ReceiveStream) error {
 		}
 		var userUUID [16]byte
 		copy(userUUID[:], buffer.Range(2, 2+16))
+		s.userAccess.RLock()
 		user, loaded := s.userMap[userUUID]
+		userPassword := s.passwordMap[user]
+		s.userAccess.RUnlock()
 		if !loaded {
 			return E.New("authentication: unknown user ", uuid.UUID(userUUID))
 		}
 		handshakeState := s.quicConn.ConnectionState()
-		tuicToken, err := handshakeState.TLS.ExportKeyingMaterial(string(userUUID[:]), []byte(s.passwordMap[user]), 32)
+		tuicToken, err := handshakeState.TLS.ExportKeyingMaterial(string(userUUID[:]), []byte(userPassword), 32)
 		if err != nil {
 			return E.Cause(err, "authentication: export keying material")
 		}
@@ -256,6 +298,10 @@ func (s *serverSession[U]) handleUniStream(stream *quic.ReceiveStream) error {
 			return E.New("authentication: token mismatch")
 		}
 		s.authUser = user
+		s.sessionAccess.Lock()
+		s.authUUID = userUUID
+		s.authSet = true
+		s.sessionAccess.Unlock()
 		close(s.authDone)
 		return nil
 	case CommandPacket:

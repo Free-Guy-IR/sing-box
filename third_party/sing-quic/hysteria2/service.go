@@ -61,6 +61,7 @@ type Service[U comparable] struct {
 	salamanderPassword    string
 	tlsConfig             aTLS.ServerConfig
 	quicConfig            *quic.Config
+	userAccess            sync.RWMutex
 	userMap               map[string]U
 	udpDisabled           bool
 	udpTimeout            time.Duration
@@ -114,7 +115,9 @@ func (s *Service[U]) UpdateUsers(userList []U, passwordList []string) {
 	for i, user := range userList {
 		userMap[passwordList[i]] = user
 	}
+	s.userAccess.Lock()
 	s.userMap = userMap
+	s.userAccess.Unlock()
 	// Kick active sessions whose credential is no longer valid (user removed /
 	// data-limited / expired). Collect under the lock, close outside it so the
 	// close-triggered removeSession cannot deadlock on sessionAccess.
@@ -229,7 +232,9 @@ func (s *serverSession[U]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		request := protocol.AuthRequestFromHeader(r.Header)
+		s.userAccess.RLock()
 		user, loaded := s.userMap[request.Auth]
+		s.userAccess.RUnlock()
 		if !loaded {
 			s.masqueradeHandler.ServeHTTP(w, r)
 			return
