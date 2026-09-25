@@ -284,6 +284,10 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 	if !c.udpDisabled {
 		go c.loopMessages(conn)
 	}
+	go func() {
+		<-quicConn.Context().Done()
+		conn.closeWithError(context.Cause(quicConn.Context()))
+	}()
 	return conn, nil
 }
 
