@@ -10,6 +10,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 
 	"golang.org/x/crypto/blake2b"
+	"golang.org/x/exp/slices"
 )
 
 const salamanderSaltLen = 8
@@ -27,14 +28,14 @@ func NewSalamanderConn(conn net.PacketConn, password []byte) net.PacketConn {
 		return &VectorisedSalamanderPacketConn{
 			SalamanderPacketConn: SalamanderPacketConn{
 				PacketConn: conn,
-				password:   password,
+				password:   slices.Clip(password),
 			},
 			writer: writer,
 		}
 	} else {
 		return &SalamanderPacketConn{
 			PacketConn: conn,
-			password:   password,
+			password:   slices.Clip(password),
 		}
 	}
 }
