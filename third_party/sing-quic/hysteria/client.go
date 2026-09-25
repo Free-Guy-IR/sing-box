@@ -279,11 +279,16 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 		packetConn.Close()
 		return nil, err
 	}
+	stopWatch := context.AfterFunc(ctx, func() {
+		_ = quicConn.CloseWithError(0, "")
+	})
+	defer stopWatch()
 	controlStream, err := quicConn.OpenStreamSync(ctx)
 	if err != nil {
 		packetConn.Close()
 		return nil, err
 	}
+	_ = controlStream.SetDeadline(time.Now().Add(ProtocolTimeout))
 	err = WriteClientHello(controlStream, ClientHello{
 		SendBPS: c.sendBPS,
 		RecvBPS: c.receiveBPS,
@@ -298,6 +303,7 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 		packetConn.Close()
 		return nil, err
 	}
+	_ = controlStream.SetDeadline(time.Time{})
 	if !serverHello.OK {
 		packetConn.Close()
 		return nil, E.New("remote error: ", serverHello.Message)
@@ -313,6 +319,10 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 	if !c.udpDisabled {
 		go c.loopMessages(conn)
 	}
+	go func() {
+		<-quicConn.Context().Done()
+		conn.closeWithError(context.Cause(quicConn.Context()))
+	}()
 	return conn, nil
 }
 
