@@ -384,8 +384,16 @@ func (c *Client) ListenPacket(ctx context.Context, destination M.Socksaddr) (net
 		conn.udpAccess.Unlock()
 	})
 	conn.udpAccess.Lock()
+	select {
+	case <-conn.connDone:
+		conn.udpAccess.Unlock()
+		stream.Close()
+		return nil, E.Errors(conn.connErr, os.ErrClosed)
+	default:
+	}
 	if debug.Enabled {
 		if _, connExists := conn.udpConnMap[response.UDPSessionID]; connExists {
+			conn.udpAccess.Unlock()
 			stream.Close()
 			return nil, E.New("udp session id duplicated")
 		}
@@ -463,7 +471,14 @@ func (c *clientQUICConnection) active() bool {
 func (c *clientQUICConnection) closeWithError(err error) {
 	c.closeOnce.Do(func() {
 		c.connErr = err
+		c.udpAccess.Lock()
 		close(c.connDone)
+		udpConnMap := c.udpConnMap
+		c.udpConnMap = make(map[uint32]*udpPacketConn)
+		c.udpAccess.Unlock()
+		for _, udpConn := range udpConnMap {
+			udpConn.closeWithError(err)
+		}
 		_ = c.quicConn.CloseWithError(0, "")
 		_ = c.rawConn.Close()
 	})

@@ -337,6 +337,13 @@ func (s *serverSession[U]) closeWithError(err error) {
 	} else {
 		s.logger.Error(E.Cause(err, "connection failed"))
 	}
+	s.udpAccess.Lock()
+	udpConnMap := s.udpConnMap
+	s.udpConnMap = make(map[uint32]*udpPacketConn)
+	s.udpAccess.Unlock()
+	for _, udpConn := range udpConnMap {
+		udpConn.closeWithError(err)
+	}
 	_ = s.quicConn.CloseWithError(0, "")
 }
 

@@ -307,6 +307,13 @@ func (s *serverSession[U]) closeWithError0(errorCode int, err error) {
 	} else {
 		s.logger.Error(E.Cause(err, "connection failed"))
 	}
+	s.udpAccess.Lock()
+	udpConnMap := s.udpConnMap
+	s.udpConnMap = make(map[uint32]*udpPacketConn)
+	s.udpAccess.Unlock()
+	for _, udpConn := range udpConnMap {
+		udpConn.closeWithError(err)
+	}
 	switch errorCode {
 	case ErrorCodeProtocolError:
 		_ = s.quicConn.CloseWithError(quic.ApplicationErrorCode(errorCode), "protocol error")
