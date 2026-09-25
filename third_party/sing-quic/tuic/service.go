@@ -313,7 +313,7 @@ func (s *serverSession[U]) handleUniStream(stream *quic.ReceiveStream) error {
 		message := allocMessage()
 		err = readUDPMessage(message, io.MultiReader(bytes.NewReader(buffer.From(2)), stream))
 		if err != nil {
-			message.release()
+			message.releaseMessage()
 			return err
 		}
 		s.handleUDPMessage(message, true)

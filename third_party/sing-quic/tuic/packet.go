@@ -38,7 +38,7 @@ func allocMessage() *udpMessage {
 func releaseMessages(messages []*udpMessage) {
 	for _, message := range messages {
 		if message != nil {
-			message.release()
+			message.releaseMessage()
 		}
 	}
 }
@@ -248,6 +248,7 @@ func (c *udpPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		destination:   destination,
 		data:          buf.As(p),
 	}
+	defer message.releaseMessage()
 	if !c.udpStream && len(p) > c.udpMTU-message.headerSize() {
 		err = c.writePackets(fragUDPMessage(message, c.udpMTU))
 		if err == nil {
@@ -276,6 +277,7 @@ func (c *udpPacketConn) inputPacket(message *udpMessage) {
 		select {
 		case c.data <- message:
 		default:
+			message.releaseMessage()
 		}
 	} else {
 		newMessage := c.defragger.feed(message)
@@ -283,6 +285,7 @@ func (c *udpPacketConn) inputPacket(message *udpMessage) {
 			select {
 			case c.data <- newMessage:
 			default:
+				newMessage.releaseMessage()
 			}
 		}
 	}
@@ -396,6 +399,7 @@ func (d *udpDefragger) feed(m *udpMessage) *udpMessage {
 		return m
 	}
 	if m.fragmentID >= m.fragmentTotal {
+		m.releaseMessage()
 		return nil
 	}
 	item, _ := d.packetMap.LoadOrStore(m.packetID, newPacketItem)
@@ -409,6 +413,7 @@ func (d *udpDefragger) feed(m *udpMessage) *udpMessage {
 		return nil
 	}
 	if item.messages[m.fragmentID] != nil {
+		m.releaseMessage()
 		return nil
 	}
 	item.messages[m.fragmentID] = m
