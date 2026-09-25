@@ -206,3 +206,84 @@ func TestServerSessionClosesUDPSessionsWhenConnectionEnds(t *testing.T) {
 		t.Fatal("the UDP session of a closed connection was still open 5s later; it would linger until udpTimeout")
 	}
 }
+
+func TestHotReloadRemovingUserClosesTheirUDPSessionsUnderTraffic(t *testing.T) {
+	serverQUIC, clientQUIC := newTestQUICPair(t, &quic.Config{EnableDatagrams: true})
+	handler := &recordingPacketHandler{packetConns: make(chan N.PacketConn, 1)}
+	service := &Service[int]{
+		ctx:        context.Background(),
+		logger:     logger.NOP(),
+		udpTimeout: time.Minute,
+		handler:    handler,
+		sessions:   make(map[*serverSession[int]]struct{}),
+	}
+	credentials := []string{"alice-credential", "bob-credential"}
+	service.UpdateUsers([]int{1, 2}, credentials)
+	session := &serverSession[int]{
+		Service:       service,
+		ctx:           service.ctx,
+		quicConn:      serverQUIC,
+		connDone:      make(chan struct{}),
+		authenticated: true,
+		authUser:      1,
+		authPassword:  credentials[0],
+		udpConnMap:    make(map[uint32]*udpPacketConn),
+	}
+	service.addSession(session)
+	defer service.removeSession(session)
+	go session.loopMessages()
+
+	stop := make(chan struct{})
+	senderDone := make(chan struct{})
+	go func() {
+		defer close(senderDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			message := &udpMessage{
+				sessionID:     7,
+				fragmentTotal: 1,
+				destination:   "127.0.0.1:53",
+				data:          buf.As([]byte("udp payload")),
+			}
+			packed := message.pack()
+			_ = clientQUIC.SendDatagram(packed.Bytes())
+			packed.Release()
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-senderDone
+	}()
+
+	var packetConn N.PacketConn
+	select {
+	case packetConn = <-handler.packetConns:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server never opened the UDP session")
+	}
+	readResult := make(chan error, 1)
+	go func() {
+		buffer := buf.NewPacket()
+		defer buffer.Release()
+		for {
+			if _, readErr := packetConn.ReadPacket(buffer); readErr != nil {
+				readResult <- readErr
+				return
+			}
+			buffer.Reset()
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	service.UpdateUsers([]int{2}, credentials[1:])
+	select {
+	case <-readResult:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the removed user's UDP session was still open 5s after the hot-reload")
+	}
+}
