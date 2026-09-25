@@ -187,6 +187,7 @@ func (s *serverSession[U]) handleConnection() {
 		s.closeWithError0(ErrorCodeProtocolError, err)
 		return
 	}
+	_ = controlStream.SetDeadline(time.Now().Add(ProtocolTimeout))
 	clientHello, err := ReadClientHello(controlStream)
 	if err != nil {
 		s.closeWithError0(ErrorCodeProtocolError, E.Cause(err, "read client hello"))
@@ -210,6 +211,7 @@ func (s *serverSession[U]) handleConnection() {
 		s.closeWithError(err)
 		return
 	}
+	_ = controlStream.SetDeadline(time.Time{})
 	s.authUser = user
 	s.quicConn.SetCongestionControl(hyCC.NewBrutalSender(uint64(math.Min(float64(s.sendBPS), float64(clientHello.RecvBPS))), s.brutalDebug, s.logger))
 	if !s.udpDisabled {
