@@ -114,6 +114,7 @@ func (w *StreamChunkWriter) Write(p []byte) (n int, err error) {
 		w.hashAccess.Unlock()
 	}
 	w.writeAccess.Lock()
+	defer w.writeAccess.Unlock()
 	err = binary.Write(w.upstream, binary.BigEndian, dataLen)
 	if err != nil {
 		return
@@ -128,7 +129,6 @@ func (w *StreamChunkWriter) Write(p []byte) (n int, err error) {
 			return
 		}
 	}
-	w.writeAccess.Unlock()
 	return
 }
 
@@ -180,6 +180,7 @@ func (w *StreamChunkWriter) WriteWithChecksum(checksum uint32, p []byte) (n int,
 		w.hashAccess.Unlock()
 	}
 	w.writeAccess.Lock()
+	defer w.writeAccess.Unlock()
 	err = binary.Write(w.upstream, binary.BigEndian, dataLen)
 	if err != nil {
 		return
@@ -198,7 +199,6 @@ func (w *StreamChunkWriter) WriteWithChecksum(checksum uint32, p []byte) (n int,
 			return
 		}
 	}
-	w.writeAccess.Unlock()
 	return
 }
 
