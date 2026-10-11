@@ -3,9 +3,11 @@ name: Fork Verify
 on:
   push:
     branches:
+      - main
       - 'v1.*-hotreload'
   pull_request:
     branches:
+      - main
       - 'v1.*-hotreload'
   workflow_dispatch:
 
