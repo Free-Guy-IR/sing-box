@@ -80,6 +80,9 @@ func (c *HopPacketConn) recvLoop(conn net.PacketConn) {
 		n, _, err := conn.ReadFrom(buffer.FreeBytes())
 		if err != nil {
 			buffer.Release()
+			if errors.Is(err, syscall.EMSGSIZE) {
+				continue
+			}
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				// Only pass through timeout errors here, not permanent errors
