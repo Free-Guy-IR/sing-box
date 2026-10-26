@@ -163,3 +163,52 @@ func TestConcurrentUserUpdatesKeepIdentityCorrect(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+func TestSharedPasswordReturnsErrorNamingEarlierUser(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name  string
+		users []testUser
+		label string
+	}{
+		{
+			name:  "named",
+			users: []testUser{{name: "alice", password: "shared"}, {name: "bob", password: "shared"}},
+			label: "alice",
+		},
+		{
+			name:  "unnamed",
+			users: []testUser{{password: "pw-0"}, {password: "shared"}, {password: "shared"}},
+			label: "1",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			service := trojan.NewService[inbounduser.Identity](&contextRecorder{contexts: make(chan context.Context, 1)}, nil, logger.NOP())
+			var err error
+			require.NotPanics(t, func() {
+				err = updateUsers(service, testCase.users)
+			})
+			require.ErrorIs(t, err, trojan.ErrUserExists)
+			require.EqualError(t, err, "user already exists: password used by "+testCase.label)
+		})
+	}
+}
+
+func TestSharedPasswordUpdateKeepsCurrentUsers(t *testing.T) {
+	t.Parallel()
+	alice := testUser{name: "alice", password: "pw-a"}
+	recorder := &contextRecorder{contexts: make(chan context.Context, 1)}
+	service := trojan.NewService[inbounduser.Identity](recorder, nil, logger.NOP())
+	require.NoError(t, updateUsers(service, []testUser{alice}))
+
+	var err error
+	require.NotPanics(t, func() {
+		err = updateUsers(service, []testUser{{name: "bob", password: "shared"}, {name: "carol", password: "shared"}})
+	})
+	require.ErrorIs(t, err, trojan.ErrUserExists)
+
+	identity, loaded := auth.UserFromContext[inbounduser.Identity](authenticate(t, recorder, service, alice))
+	require.True(t, loaded)
+	require.Equal(t, "alice", identity.Label())
+}

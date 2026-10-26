@@ -17,6 +17,10 @@ func (i Identity) Label() string {
 	return F.ToString(i.Index)
 }
 
+func (i Identity) String() string {
+	return i.Label()
+}
+
 func Identities[T any](users []T, nameOf func(T) string) []Identity {
 	return common.MapIndexed(users, func(index int, user T) Identity {
 		return Identity{Name: nameOf(user), Index: index}
