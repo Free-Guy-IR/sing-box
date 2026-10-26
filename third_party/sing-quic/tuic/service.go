@@ -283,9 +283,9 @@ func (s *serverSession[U]) handleUniStream(stream *quic.ReceiveStream) error {
 		var userUUID [16]byte
 		copy(userUUID[:], buffer.Range(2, 2+16))
 		s.userAccess.RLock()
+		defer s.userAccess.RUnlock()
 		user, loaded := s.userMap[userUUID]
 		userPassword := s.passwordMap[user]
-		s.userAccess.RUnlock()
 		if !loaded {
 			return E.New("authentication: unknown user ", uuid.UUID(userUUID))
 		}

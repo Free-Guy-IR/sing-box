@@ -234,6 +234,11 @@ func (s *serverSession[U]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		request := protocol.AuthRequestFromHeader(r.Header)
 		s.userAccess.RLock()
 		user, loaded := s.userMap[request.Auth]
+		if loaded {
+			s.sessionAccess.Lock()
+			s.authPassword = request.Auth
+			s.sessionAccess.Unlock()
+		}
 		s.userAccess.RUnlock()
 		if !loaded {
 			s.masqueradeHandler.ServeHTTP(w, r)
@@ -241,9 +246,6 @@ func (s *serverSession[U]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.authUser = user
 		s.authenticated = true
-		s.sessionAccess.Lock()
-		s.authPassword = request.Auth
-		s.sessionAccess.Unlock()
 		var rxAuto bool
 		if s.receiveBPS > 0 && s.ignoreClientBandwidth && request.Rx == 0 {
 			s.logger.Debug("process connection from ", r.RemoteAddr, ": BBR disabled by server")
