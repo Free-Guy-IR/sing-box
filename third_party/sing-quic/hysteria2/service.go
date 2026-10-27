@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/quic-go"
@@ -213,7 +214,7 @@ type serverSession[U comparable] struct {
 	connAccess    sync.Mutex
 	connDone      chan struct{}
 	connErr       error
-	authenticated bool
+	authenticated atomic.Bool
 	authUser      U
 	authPassword  string
 	udpAccess     sync.RWMutex
@@ -222,7 +223,7 @@ type serverSession[U comparable] struct {
 
 func (s *serverSession[U]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Host == protocol.URLHost && r.URL.Path == protocol.URLPath {
-		if s.authenticated {
+		if s.authenticated.Load() {
 			protocol.AuthResponseToHeader(w.Header(), protocol.AuthResponse{
 				UDPEnabled: !s.udpDisabled,
 				Rx:         s.receiveBPS,
@@ -236,7 +237,11 @@ func (s *serverSession[U]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		user, loaded := s.userMap[request.Auth]
 		if loaded {
 			s.sessionAccess.Lock()
-			s.authPassword = request.Auth
+			if !s.authenticated.Load() {
+				s.authUser = user
+				s.authPassword = request.Auth
+				s.authenticated.Store(true)
+			}
 			s.sessionAccess.Unlock()
 		}
 		s.userAccess.RUnlock()
@@ -244,8 +249,6 @@ func (s *serverSession[U]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.masqueradeHandler.ServeHTTP(w, r)
 			return
 		}
-		s.authUser = user
-		s.authenticated = true
 		var rxAuto bool
 		if s.receiveBPS > 0 && s.ignoreClientBandwidth && request.Rx == 0 {
 			s.logger.Debug("process connection from ", r.RemoteAddr, ": BBR disabled by server")
@@ -293,7 +296,7 @@ func (s *serverSession[U]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serverSession[U]) dispatchStream(frameType http3.FrameType, stream *quic.Stream, err error) (bool, error) {
-	if !s.authenticated || err != nil {
+	if !s.authenticated.Load() || err != nil {
 		return false, nil
 	}
 	if frameType != protocol.FrameTypeTCPRequest {

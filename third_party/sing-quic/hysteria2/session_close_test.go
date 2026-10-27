@@ -220,15 +220,15 @@ func TestHotReloadRemovingUserClosesTheirUDPSessionsUnderTraffic(t *testing.T) {
 	credentials := []string{"alice-credential", "bob-credential"}
 	service.UpdateUsers([]int{1, 2}, credentials)
 	session := &serverSession[int]{
-		Service:       service,
-		ctx:           service.ctx,
-		quicConn:      serverQUIC,
-		connDone:      make(chan struct{}),
-		authenticated: true,
-		authUser:      1,
-		authPassword:  credentials[0],
-		udpConnMap:    make(map[uint32]*udpPacketConn),
+		Service:      service,
+		ctx:          service.ctx,
+		quicConn:     serverQUIC,
+		connDone:     make(chan struct{}),
+		authUser:     1,
+		authPassword: credentials[0],
+		udpConnMap:   make(map[uint32]*udpPacketConn),
 	}
+	session.authenticated.Store(true)
 	service.addSession(session)
 	defer service.removeSession(session)
 	go session.loopMessages()

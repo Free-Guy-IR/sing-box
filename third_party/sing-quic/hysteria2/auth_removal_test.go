@@ -165,7 +165,7 @@ func TestRemovalBeforeLookupRejectsTheAuthentication(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("a password removed before its lookup answered %d", status)
 	}
-	if f.session.authenticated {
+	if f.session.authenticated.Load() {
 		t.Fatal("a password removed before its lookup authenticated the session")
 	}
 	if password := f.registeredPassword(); password != "" {
