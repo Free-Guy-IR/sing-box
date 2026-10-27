@@ -297,11 +297,16 @@ func (s *serverSession[U]) handleUniStream(stream *quic.ReceiveStream) error {
 		if !bytes.Equal(tuicToken, buffer.Range(2+16, 2+16+32)) {
 			return E.New("authentication: token mismatch")
 		}
-		s.authUser = user
 		s.sessionAccess.Lock()
+		defer s.sessionAccess.Unlock()
+		select {
+		case <-s.authDone:
+			return E.New("authentication: multiple authentication requests")
+		default:
+		}
+		s.authUser = user
 		s.authUUID = userUUID
 		s.authSet = true
-		s.sessionAccess.Unlock()
 		close(s.authDone)
 		return nil
 	case CommandPacket:

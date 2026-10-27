@@ -154,6 +154,16 @@ func newAuthRemovalFixture(t *testing.T) *authRemovalFixture {
 
 func (f *authRemovalFixture) authenticate(t *testing.T) chan error {
 	t.Helper()
+	serverStream := f.authStream(t)
+	result := make(chan error, 1)
+	go func() {
+		result <- f.session.handleUniStream(serverStream)
+	}()
+	return result
+}
+
+func (f *authRemovalFixture) authStream(t *testing.T) *quic.ReceiveStream {
+	t.Helper()
 	state := f.client.ConnectionState()
 	token, err := state.TLS.ExportKeyingMaterial(string(aliceUUID[:]), []byte("alice-secret"), 32)
 	if err != nil {
@@ -177,11 +187,7 @@ func (f *authRemovalFixture) authenticate(t *testing.T) chan error {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := make(chan error, 1)
-	go func() {
-		result <- f.session.handleUniStream(serverStream)
-	}()
-	return result
+	return serverStream
 }
 
 func (f *authRemovalFixture) update(users map[[16]byte]int, passwords map[int]string) chan struct{} {
