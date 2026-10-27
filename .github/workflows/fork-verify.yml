@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   SINGBOX_TAGS: with_quic,with_utls,with_clash_api,with_v2ray_api
@@ -32,9 +32,9 @@ jobs:
             goarch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Build
@@ -49,12 +49,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Vet
         run: go vet -tags "${SINGBOX_TAGS}" ./...
       - name: Test
-        run: go test -race -tags "${SINGBOX_TAGS}" ./common/inbounduser/... ./protocol/... ./transport/... github.com/sagernet/sing-quic/...
+        run: go test -race -tags "${SINGBOX_TAGS}" ./common/inbounduser/... ./common/ja3/... ./common/sniff/... ./dns/transport/fakeip/... ./experimental/clashapi/... ./protocol/... ./transport/... github.com/sagernet/sing-quic/...
