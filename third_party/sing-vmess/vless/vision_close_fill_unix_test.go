@@ -44,6 +44,9 @@ func TestVisionUnixStreamConnsCleanupClosesBothEnds(t *testing.T) {
 	}) {
 		t.FailNow()
 	}
+	if first == nil || second == nil {
+		t.Skip("the pair subtest did not run")
+	}
 	for name, conn := range map[string]net.Conn{"first": first, "second": second} {
 		if _, err := conn.Write([]byte{0}); !errors.Is(err, net.ErrClosed) {
 			t.Errorf("write on the %s end after the cleanups returned %v, want %v", name, err, net.ErrClosed)
