@@ -1165,8 +1165,9 @@ func readVisionPeerContentWithin(conn *VisionConn, size int, timeout time.Durati
 }
 
 type visionDriveOptions struct {
-	handshakeOnly        bool
-	mayEndWithPeerDirect bool
+	handshakeOnly      bool
+	mayEndOnPeerFrame  bool
+	startWithXTLSHello bool
 }
 
 func driveVisionRealConn(random *mathrand.Rand, pair visionTLSPair, conn *VisionConn, options visionDriveOptions) ([]string, error) {
@@ -1193,6 +1194,19 @@ func driveVisionRealConn(random *mathrand.Rand, pair visionTLSPair, conn *Vision
 			}
 		}
 		return nil
+	}
+	if options.startWithXTLSHello {
+		cipher := ciphers[random.Intn(4)]
+		steps = append(steps, fmt.Sprintf("peer sends a TLS 1.3 server hello cipher %#x first", cipher))
+		content := visionServerHelloRecord(cipher, true)
+		if _, err := pair.server.Write(visionTestFrame(true, commandPaddingContinue, content, random.Intn(1400))); err != nil {
+			return steps, err
+		}
+		peerFrames++
+		unread += len(content)
+		if err := readSome(true); err != nil {
+			return steps, err
+		}
 	}
 	for step := random.Intn(12); step > 0; step-- {
 		var err error
@@ -1320,7 +1334,12 @@ func driveVisionRealConn(random *mathrand.Rand, pair visionTLSPair, conn *Vision
 			return steps, err
 		}
 	}
-	if options.mayEndWithPeerDirect && peerCommand == commandPaddingContinue && !peerStalled && unread == 0 && random.Intn(2) == 0 {
+	ending := 0
+	if options.mayEndOnPeerFrame && peerCommand == commandPaddingContinue && !peerStalled && unread == 0 {
+		ending = random.Intn(5)
+	}
+	switch ending {
+	case 1:
 		steps = append(steps, "peer sends a direct frame last")
 		if _, err := pair.server.Write(visionTestFrame(peerFrames == 0, commandPaddingDirect, visionApplicationDataRecord(), random.Intn(1400))); err != nil {
 			return steps, err
@@ -1332,6 +1351,42 @@ func driveVisionRealConn(random *mathrand.Rand, pair visionTLSPair, conn *Vision
 		if !conn.directRead {
 			return steps, errors.New("the peer's direct frame did not switch the read side")
 		}
+	case 2, 3:
+		content := visionLargeApplicationDataRecord()[:200]
+		frame := visionTestFrame(peerFrames == 0, commandPaddingContinue, content, random.Intn(1400))
+		headerLen := 5
+		if peerFrames == 0 {
+			headerLen = 21
+		}
+		cut := headerLen + 1 + random.Intn(len(content)-1)
+		if ending == 2 && peerFrames > 0 {
+			cut = 1 + random.Intn(4)
+		}
+		steps = append(steps, fmt.Sprintf("peer sends the first %d bytes of a frame last", cut))
+		if _, err := pair.server.Write(frame[:cut]); err != nil {
+			return steps, err
+		}
+		peerStalled = true
+		for {
+			_, err := readVisionPeerContentWithin(conn, 1+random.Intn(64), 100*time.Millisecond)
+			if netErr, isNet := err.(net.Error); isNet && netErr.Timeout() {
+				break
+			}
+			if err != nil {
+				return steps, err
+			}
+		}
+	case 4:
+		content := visionLargeApplicationDataRecord()[:200]
+		steps = append(steps, "peer sends a frame last and the client reads part of it")
+		if _, err := pair.server.Write(visionTestFrame(peerFrames == 0, commandPaddingContinue, content, random.Intn(1400))); err != nil {
+			return steps, err
+		}
+		n, err := readVisionPeerContentWithin(conn, 1+random.Intn(64), 5*time.Second)
+		if err != nil {
+			return steps, err
+		}
+		unread += len(content) - n
 	}
 	if peerStalled || unread > 0 {
 		steps = append(steps, "close with peer data buffered in VisionConn or a peer frame cut short")
@@ -1546,9 +1601,15 @@ func TestVisionCloseDoesNotWaitForAWriteStuckOnARealConnAcrossStates(t *testing.
 			_, err := io.Copy(io.Discard, pair.serverRaw)
 			drained <- err
 		}()
-		handshakeOnly := random.Intn(2) == 0
-		steps, err := driveVisionRealConn(random, pair, conn, visionDriveOptions{handshakeOnly: handshakeOnly, mayEndWithPeerDirect: true})
-		if handshakeOnly {
+		options := visionDriveOptions{handshakeOnly: random.Intn(2) == 0, mayEndOnPeerFrame: true}
+		records := [][]byte{visionApplicationDataRecord(), visionHandshakeThenLargeApplicationData(), visionHandshakeRecord(), make([]byte, 8000)}
+		if random.Intn(2) == 0 {
+			options.handshakeOnly = true
+			options.startWithXTLSHello = true
+			records = records[:2]
+		}
+		steps, err := driveVisionRealConn(random, pair, conn, options)
+		if options.handshakeOnly {
 			steps = append([]string{"the client writes no application data"}, steps...)
 		}
 		if err != nil {
@@ -1571,7 +1632,7 @@ func TestVisionCloseDoesNotWaitForAWriteStuckOnARealConnAcrossStates(t *testing.
 			filled = n == 0
 		}
 		underTLS.Conn.SetWriteDeadline(time.Time{})
-		record := [][]byte{visionApplicationDataRecord(), visionHandshakeThenLargeApplicationData(), visionHandshakeRecord(), make([]byte, 8000)}[random.Intn(4)]
+		record := records[random.Intn(len(records))]
 		steps = append(steps, "the peer stops reading and the socket fills", fmt.Sprintf("write %d bytes starting %x", len(record), record[:3]))
 		writeDone := make(chan error, 1)
 		go func() {
@@ -1633,10 +1694,28 @@ func TestVisionCloseDoesNotWaitForAWriteStuckOnARealConnAcrossStates(t *testing.
 			if len(record) == len(visionHandshakeThenLargeApplicationData()) {
 				coverage["switching frame stuck on the TLS conn behind a handshake record"]++
 			}
+			if conn.withinPaddingBuffers && conn.remainingContent > 0 {
+				coverage["switching frame stuck on the TLS conn in the middle of peer content"]++
+			}
+			if len(conn.remainingBuffers) > 0 {
+				coverage["switching frame stuck on the TLS conn with buffered read data"]++
+			}
+			if conn.paddingHeaderLen > 0 {
+				coverage["switching frame stuck on the TLS conn with a split padding header"]++
+			}
 		case direct:
 			coverage["stuck on the raw conn"]++
 			if conn.directRead {
 				coverage["stuck on the raw conn after the peer's direct frame"]++
+			}
+			if conn.withinPaddingBuffers && conn.remainingContent > 0 {
+				coverage["stuck on the raw conn in the middle of peer content"]++
+			}
+			if len(conn.remainingBuffers) > 0 {
+				coverage["stuck on the raw conn with buffered read data"]++
+			}
+			if conn.paddingHeaderLen > 0 {
+				coverage["stuck on the raw conn with a split padding header"]++
 			}
 		default:
 			coverage["stuck on the TLS conn"]++
@@ -1661,6 +1740,15 @@ func TestVisionCloseDoesNotWaitForAWriteStuckOnARealConnAcrossStates(t *testing.
 			if !conn.isPadding {
 				coverage["stuck on the TLS conn after the padding ended"]++
 			}
+			if conn.withinPaddingBuffers && conn.remainingContent > 0 {
+				coverage["stuck on the TLS conn in the middle of peer content"]++
+			}
+			if len(conn.remainingBuffers) > 0 {
+				coverage["stuck on the TLS conn with buffered read data"]++
+			}
+			if conn.paddingHeaderLen > 0 {
+				coverage["stuck on the TLS conn with a split padding header"]++
+			}
 		}
 		if conn.input.Len() > 0 || conn.rawInput.Len() > 0 || len(conn.remainingBuffers) > 0 || conn.paddingHeaderLen > 0 {
 			coverage["stuck with peer data left in VisionConn or the TLS conn"]++
@@ -1671,6 +1759,12 @@ func TestVisionCloseDoesNotWaitForAWriteStuckOnARealConnAcrossStates(t *testing.
 		"switching frame stuck on the TLS conn after the peer's direct frame",
 		"switching frame stuck on the TLS conn with the peer still padding",
 		"switching frame stuck on the TLS conn behind a handshake record",
+		"switching frame stuck on the TLS conn in the middle of peer content",
+		"switching frame stuck on the TLS conn with buffered read data",
+		"switching frame stuck on the TLS conn with a split padding header",
+		"stuck on the TLS conn in the middle of peer content",
+		"stuck on the TLS conn with buffered read data",
+		"stuck on the TLS conn with a split padding header",
 		"stuck on the raw conn",
 		"stuck on the raw conn after the peer's direct frame",
 		"stuck on the TLS conn while filtering",
