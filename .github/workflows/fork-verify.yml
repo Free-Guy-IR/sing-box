@@ -97,9 +97,9 @@ jobs:
           go test -json -count=1 -tags "${SINGBOX_TAGS}" -run '^TestVMess$/.*/^(self|packetaddr)' . > vmess.json || status=1
           go test -json -count=1 -tags "${SINGBOX_TAGS}" -run '^TestVMessAuto$/^self$' . >> vmess.json || status=1
           python3 - "$brutal" self.json vmess.json <<'EOF' || status=1
-          import json, re, sys
+          import json, sys
           brutal = sys.argv[1] == "1"
-          passed, failed, output = set(), set(), {}
+          passed, failed, skipped, seen, output = set(), set(), set(), set(), {}
           for path in sys.argv[2:]:
               with open(path) as f:
                   for line in f:
@@ -109,23 +109,57 @@ jobs:
                       event = json.loads(line)
                       name = event.get("Test") or event.get("Package") or event.get("ImportPath") or path
                       action = event.get("Action")
+                      if "Test" in event:
+                          seen.add(name)
                       if action in ("output", "build-output"):
                           output.setdefault(name, []).append(event.get("Output", ""))
                       elif action == "pass" and "Test" in event:
                           passed.add(name)
+                      elif action == "skip" and "Test" in event:
+                          skipped.add(name)
                       elif action in ("fail", "build-fail"):
                           failed.add(name)
-          required = ["TestHysteria2Self", "TestHysteria2Hop", "TestHysteriaSelf", "TestTUICSelf", "TestVMessSMux", "TestMuxCoolSelf", "TestV2RayGRPCLite", "TestV2RayHTTPUpgrade", "TestV2RayHTTPSelf", "TestV2RayHTTPPlainSelf", "TestVMessQUICSelf", "TestVMessAuto/self"]
+          vmess_leaves = {
+              "zero": ["self", "self-legacy", "packetaddr"],
+              "none": ["self", "self-legacy", "packetaddr"],
+              "aes-128-gcm": ["self", "self-padding", "self-authid", "self-padding-authid", "self-legacy", "self-legacy-padding", "packetaddr"],
+              "chacha20-poly1305": ["self", "self-padding", "self-authid", "self-padding-authid", "self-legacy", "self-legacy-padding", "packetaddr"],
+              "aes-128-cfb": ["self", "self-padding", "self-authid", "self-padding-authid", "self-legacy", "self-legacy-padding", "packetaddr"],
+          }
+          vmess = {f"TestVMess/{security}/{leaf}" for security, leaves in vmess_leaves.items() for leaf in leaves}
+          expected = {
+              "TestHysteria2Self", "TestHysteria2Self/self", "TestHysteria2Self/self-salamander", "TestHysteria2Self/self-hop", "TestHysteria2Self/self-hop-salamander",
+              "TestHysteria2Hop",
+              "TestHysteriaSelf",
+              "TestTUICSelf", "TestTUICSelf/self", "TestTUICSelf/self-udp-stream", "TestTUICSelf/self-early",
+              "TestVMessSMux",
+              "TestMuxCoolSelf",
+              "TestV2RayGRPCLite",
+              "TestV2RayGRPCLite/server", "TestV2RayGRPCLite/server/vmess", "TestV2RayGRPCLite/server/trojan",
+              "TestV2RayGRPCLite/client", "TestV2RayGRPCLite/client/vmess", "TestV2RayGRPCLite/client/trojan",
+              "TestV2RayGRPCLite/self", "TestV2RayGRPCLite/self/vmess", "TestV2RayGRPCLite/self/trojan",
+              "TestV2RayHTTPUpgrade", "TestV2RayHTTPUpgrade/self", "TestV2RayHTTPUpgrade/self/vmess", "TestV2RayHTTPUpgrade/self/trojan",
+              "TestV2RayHTTPSelf", "TestV2RayHTTPSelf/vmess", "TestV2RayHTTPSelf/trojan",
+              "TestV2RayHTTPPlainSelf",
+              "TestVMessQUICSelf",
+              "TestVMessAuto", "TestVMessAuto/self",
+              "TestVMess",
+          } | {f"TestVMess/{security}" for security in vmess_leaves} | vmess
           if brutal:
-              required.append("TestBrutalVMess")
-          missing = [name for name in required if name not in passed]
-          leaves = sorted(name for name in passed if re.fullmatch(r"TestVMess/[^/]+/(self|packetaddr)[^/]*", name))
+              expected.add("TestBrutalVMess")
+          missing = sorted(expected - passed)
+          unexpected = sorted(seen - expected)
           for name in sorted(failed):
               print("".join(output.get(name, [])), end="")
               print(f"FAIL {name}")
+          for name in sorted(skipped):
+              print("".join(output.get(name, [])), end="")
+              print(f"SKIP {name}")
           for name in missing:
               print(f"no pass event for {name}")
-          print(f"{len(required) - len(missing)}/{len(required)} named tests and {len(leaves)} TestVMess self/packetaddr leaves passed")
-          sys.exit(1 if failed or missing or len(leaves) < 27 else 0)
+          for name in unexpected:
+              print(f"unexpected test {name}")
+          print(f"{len(expected) - len(missing)}/{len(expected)} expected tests passed, {len(vmess & passed)}/{len(vmess)} TestVMess leaves")
+          sys.exit(1 if failed or skipped or missing or unexpected or len(vmess) != 27 else 0)
           EOF
           exit "$status"
