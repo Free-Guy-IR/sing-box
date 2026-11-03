@@ -58,3 +58,74 @@ jobs:
         run: go vet -tags "${SINGBOX_TAGS}" ./...
       - name: Test
         run: go test -race -tags "${SINGBOX_TAGS}" ./common/inbounduser/... ./common/ja3/... ./common/sniff/... ./dns/transport/fakeip/... ./experimental/clashapi/... ./protocol/... ./transport/... github.com/sagernet/sing-quic/... github.com/sagernet/sing-vmess/...
+
+  e2e-self:
+    name: Docker-free self tests
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_HOST: unix:///nonexistent.sock
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: test/go.mod
+      - name: Check test module
+        working-directory: test
+        shell: bash
+        run: |
+          go mod tidy -diff
+          test "$(go list -m -f '{{.Replace.Path}}' github.com/sagernet/sing-quic)" = ../third_party/sing-quic
+          test "$(go list -m -f '{{.Replace.Path}}' github.com/sagernet/sing-vmess)" = ../third_party/sing-vmess
+          go vet -tags "${SINGBOX_TAGS}" ./...
+      - name: Self tests
+        working-directory: test
+        shell: bash
+        run: |
+          brutal=0
+          skip=(-skip '^TestBrutalVMess$')
+          sudo modprobe tcp_brutal 2>/dev/null || true
+          if grep -qw brutal /proc/sys/net/ipv4/tcp_available_congestion_control; then
+            brutal=1
+            skip=()
+          else
+            echo "tcp_brutal congestion control is not available on this kernel; skipping TestBrutalVMess"
+          fi
+          status=0
+          go test -json -count=1 -tags "${SINGBOX_TAGS}" "${skip[@]}" -run '^(TestBrutalVMess|TestHysteria2Self|TestHysteria2Hop|TestHysteriaSelf|TestTUICSelf|TestVMessSMux|TestMuxCoolSelf|TestV2RayGRPCLite|TestV2RayHTTPUpgrade|TestV2RayHTTPSelf|TestV2RayHTTPPlainSelf|TestVMessQUICSelf)$' . > self.json || status=1
+          go test -json -count=1 -tags "${SINGBOX_TAGS}" -run '^TestVMess$/.*/^(self|packetaddr)' . > vmess.json || status=1
+          go test -json -count=1 -tags "${SINGBOX_TAGS}" -run '^TestVMessAuto$/^self$' . >> vmess.json || status=1
+          python3 - "$brutal" self.json vmess.json <<'EOF' || status=1
+          import json, re, sys
+          brutal = sys.argv[1] == "1"
+          passed, failed, output = set(), set(), {}
+          for path in sys.argv[2:]:
+              with open(path) as f:
+                  for line in f:
+                      if not line.startswith("{"):
+                          print(line, end="")
+                          continue
+                      event = json.loads(line)
+                      name = event.get("Test") or event.get("Package") or event.get("ImportPath") or path
+                      action = event.get("Action")
+                      if action in ("output", "build-output"):
+                          output.setdefault(name, []).append(event.get("Output", ""))
+                      elif action == "pass" and "Test" in event:
+                          passed.add(name)
+                      elif action in ("fail", "build-fail"):
+                          failed.add(name)
+          required = ["TestHysteria2Self", "TestHysteria2Hop", "TestHysteriaSelf", "TestTUICSelf", "TestVMessSMux", "TestMuxCoolSelf", "TestV2RayGRPCLite", "TestV2RayHTTPUpgrade", "TestV2RayHTTPSelf", "TestV2RayHTTPPlainSelf", "TestVMessQUICSelf", "TestVMessAuto/self"]
+          if brutal:
+              required.append("TestBrutalVMess")
+          missing = [name for name in required if name not in passed]
+          leaves = sorted(name for name in passed if re.fullmatch(r"TestVMess/[^/]+/(self|packetaddr)[^/]*", name))
+          for name in sorted(failed):
+              print("".join(output.get(name, [])), end="")
+              print(f"FAIL {name}")
+          for name in missing:
+              print(f"no pass event for {name}")
+          print(f"{len(required) - len(missing)}/{len(required)} named tests and {len(leaves)} TestVMess self/packetaddr leaves passed")
+          sys.exit(1 if failed or missing or len(leaves) < 27 else 0)
+          EOF
+          exit "$status"
