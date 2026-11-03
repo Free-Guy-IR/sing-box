@@ -14,6 +14,7 @@ import (
 	"math/big"
 	mathrand "math/rand"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -96,6 +97,11 @@ type visionTLSPair struct {
 
 func newVisionTLSPair(t *testing.T) visionTLSPair {
 	t.Helper()
+	return newVisionTLSPairOver(t, func(conn net.Conn) net.Conn { return conn })
+}
+
+func newVisionTLSPairOver(t *testing.T, wrapClientRaw func(net.Conn) net.Conn) visionTLSPair {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +143,7 @@ func newVisionTLSPair(t *testing.T) visionTLSPair {
 		SessionTicketsDisabled:      true,
 		DynamicRecordSizingDisabled: true,
 	})
-	client := tls.Client(clientRaw, &tls.Config{
+	client := tls.Client(wrapClientRaw(clientRaw), &tls.Config{
 		ServerName:                  "vision.test",
 		RootCAs:                     roots,
 		MinVersion:                  tls.VersionTLS13,
@@ -1131,19 +1137,21 @@ func (c *visionRawWriteWatch) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
-func waitForAStuckWrite(writingSince *atomic.Int64, writeDone chan error) error {
+func waitForAStuckWrite(writeDone chan error, stuckFor time.Duration, writingSince ...*atomic.Int64) (int, error) {
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case err := <-writeDone:
-			return fmt.Errorf("the writes to a peer that reads nothing ended with %v", err)
+			return -1, fmt.Errorf("the writes to a peer that reads nothing ended with %v", err)
 		case <-time.After(10 * time.Millisecond):
 		}
-		if since := writingSince.Load(); since != 0 && time.Since(time.Unix(0, since)) > 200*time.Millisecond {
-			return nil
+		for index, since := range writingSince {
+			if started := since.Load(); started != 0 && time.Since(time.Unix(0, started)) > stuckFor {
+				return index, nil
+			}
 		}
 	}
-	return errors.New("no write got stuck on the conn")
+	return -1, errors.New("no write got stuck on the conn")
 }
 
 func (c *visionPlaintextRecorder) ReaderReplaceable() bool { return true }
@@ -1156,165 +1164,197 @@ func readVisionPeerContentWithin(conn *VisionConn, size int, timeout time.Durati
 	return conn.Read(make([]byte, size))
 }
 
+type visionDriveOptions struct {
+	handshakeOnly        bool
+	mayEndWithPeerDirect bool
+}
+
+func driveVisionRealConn(random *mathrand.Rand, pair visionTLSPair, conn *VisionConn, options visionDriveOptions) ([]string, error) {
+	ciphers := []uint16{0x1301, 0x1302, 0x1303, 0x1304, 0x1305}
+	var steps []string
+	if random.Intn(3) == 0 {
+		conn.input = bytes.NewReader(make([]byte, 1+random.Intn(40)))
+		conn.rawInput = bytes.NewBuffer(make([]byte, 1+random.Intn(40)))
+		steps = append(steps, "tls holds unread input")
+	}
+	peerFrames := 0
+	peerCommand := commandPaddingContinue
+	peerStalled := false
+	unread := 0
+	readSome := func(all bool) error {
+		for unread > 0 {
+			n, err := readVisionPeerContentWithin(conn, 1+random.Intn(64), 5*time.Second)
+			unread -= n
+			if err != nil {
+				return err
+			}
+			if !all {
+				return nil
+			}
+		}
+		return nil
+	}
+	for step := random.Intn(12); step > 0; step-- {
+		var err error
+		switch random.Intn(7) {
+		case 0:
+			steps = append(steps, "write a client hello")
+			_, err = conn.Write(visionClientHelloRecord())
+		case 1:
+			steps = append(steps, "write a handshake record")
+			_, err = conn.Write(visionHandshakeRecord())
+		case 2:
+			if options.handshakeOnly {
+				continue
+			}
+			steps = append(steps, "write an application data record")
+			_, err = conn.Write(visionApplicationDataRecord())
+		case 3:
+			if options.handshakeOnly {
+				continue
+			}
+			steps = append(steps, "write a handshake record and a large application data record at once")
+			_, err = conn.Write(visionHandshakeThenLargeApplicationData())
+		case 4:
+			if unread > 0 && !peerStalled {
+				steps = append(steps, "short read")
+				err = readSome(false)
+			}
+		case 5, 6:
+			if peerStalled {
+				continue
+			}
+			if unread > 0 {
+				steps = append(steps, "read what the peer sent before")
+				if err = readSome(true); err != nil {
+					break
+				}
+			}
+			switch peerCommand {
+			case commandPaddingContinue:
+				command := []byte{commandPaddingContinue, commandPaddingContinue, commandPaddingDirect, commandPaddingEnd}[random.Intn(4)]
+				content := visionApplicationDataRecord()
+				if command == commandPaddingContinue {
+					cipher := ciphers[random.Intn(len(ciphers))]
+					tls13 := random.Intn(5) != 0
+					content = visionServerHelloRecord(cipher, tls13)
+					steps = append(steps, fmt.Sprintf("peer sends a server hello cipher %#x tls13 %v", cipher, tls13))
+				} else {
+					steps = append(steps, fmt.Sprintf("peer sends a frame with command %d", command))
+				}
+				headerLen := 5
+				if peerFrames == 0 {
+					headerLen = 21
+				}
+				frame := visionTestFrame(peerFrames == 0, command, content, random.Intn(1400))
+				peerFrames++
+				switch {
+				case command == commandPaddingContinue && random.Intn(3) == 0:
+					split := headerLen + 79 + random.Intn(len(content)-79)
+					steps = append(steps, fmt.Sprintf("in two TLS records split at %d", split))
+					if _, err = pair.server.Write(frame[:split]); err == nil {
+						_, err = pair.server.Write(frame[split:])
+					}
+					unread += len(content)
+					if err == nil {
+						err = readSome(true)
+					}
+				case command != commandPaddingDirect && random.Intn(4) == 0:
+					split := 1 + random.Intn(len(frame)-1)
+					if peerFrames == 1 {
+						split = 21 + random.Intn(len(frame)-21)
+					} else if random.Intn(2) == 0 {
+						split = 1 + random.Intn(4)
+					}
+					steps = append(steps, fmt.Sprintf("only the first %d bytes arrive", split))
+					_, err = pair.server.Write(frame[:split])
+					peerStalled = true
+					for err == nil {
+						var n int
+						n, err = readVisionPeerContentWithin(conn, 1+random.Intn(64), 100*time.Millisecond)
+						unread -= n
+						if netErr, isNet := err.(net.Error); isNet && netErr.Timeout() {
+							err = nil
+							break
+						}
+					}
+				default:
+					_, err = pair.server.Write(frame)
+					unread += len(content)
+					if command == commandPaddingDirect {
+						unread += conn.input.Len() + conn.rawInput.Len()
+					}
+					if err == nil {
+						err = readSome(command == commandPaddingDirect || random.Intn(2) == 0)
+					}
+					if command == commandPaddingDirect && err == nil && !conn.directRead {
+						err = errors.New("the peer's direct frame did not switch the read side")
+					}
+				}
+				peerCommand = command
+			case commandPaddingDirect:
+				if unread > 0 {
+					continue
+				}
+				steps = append(steps, "peer sends raw bytes")
+				_, err = pair.serverRaw.Write(visionApplicationDataRecord())
+				unread += len(visionApplicationDataRecord())
+				if err == nil {
+					err = readSome(true)
+				}
+			case commandPaddingEnd:
+				steps = append(steps, "peer sends plain bytes")
+				_, err = pair.server.Write(visionApplicationDataRecord())
+				unread += len(visionApplicationDataRecord())
+				if err == nil {
+					err = readSome(random.Intn(2) == 0)
+				}
+			}
+		}
+		if err != nil {
+			return steps, err
+		}
+	}
+	if !peerStalled && unread > 0 && random.Intn(2) == 0 {
+		if err := readSome(true); err != nil {
+			return steps, err
+		}
+	}
+	if options.mayEndWithPeerDirect && peerCommand == commandPaddingContinue && !peerStalled && unread == 0 && random.Intn(2) == 0 {
+		steps = append(steps, "peer sends a direct frame last")
+		if _, err := pair.server.Write(visionTestFrame(peerFrames == 0, commandPaddingDirect, visionApplicationDataRecord(), random.Intn(1400))); err != nil {
+			return steps, err
+		}
+		unread += len(visionApplicationDataRecord()) + conn.input.Len() + conn.rawInput.Len()
+		if err := readSome(true); err != nil {
+			return steps, err
+		}
+		if !conn.directRead {
+			return steps, errors.New("the peer's direct frame did not switch the read side")
+		}
+	}
+	if peerStalled || unread > 0 {
+		steps = append(steps, "close with peer data buffered in VisionConn or a peer frame cut short")
+	}
+	return steps, nil
+}
+
 func TestVisionCloseOnRealConnsAcrossStates(t *testing.T) {
 	random := mathrand.New(mathrand.NewSource(20261104))
 	closeNotifyHeader := []byte{0x17, 0x03, 0x03, 0x00, 0x13}
-	ciphers := []uint16{0x1301, 0x1302, 0x1303, 0x1304, 0x1305}
 	coverage := map[string]int{}
 	for iteration := 0; iteration < 300; iteration++ {
 		pair := newVisionTLSPair(t)
 		tlsSide := &visionPlaintextRecorder{Conn: pair.client}
 		conn := newFreshVisionConn(tlsSide, pair.client.NetConn())
-		var steps []string
-		if random.Intn(3) == 0 {
-			conn.input = bytes.NewReader(make([]byte, 1+random.Intn(40)))
-			conn.rawInput = bytes.NewBuffer(make([]byte, 1+random.Intn(40)))
-			steps = append(steps, "tls holds unread input")
-		}
 		drained := make(chan visionReadResult, 1)
 		go func() {
 			data, err := io.ReadAll(pair.serverRaw)
 			drained <- visionReadResult{data, err}
 		}()
-		peerFrames := 0
-		peerCommand := commandPaddingContinue
-		peerStalled := false
-		unread := 0
-		readSome := func(all bool) error {
-			for unread > 0 {
-				n, err := readVisionPeerContentWithin(conn, 1+random.Intn(64), 5*time.Second)
-				unread -= n
-				if err != nil {
-					return err
-				}
-				if !all {
-					return nil
-				}
-			}
-			return nil
-		}
-		for step := random.Intn(12); step > 0; step-- {
-			var err error
-			switch random.Intn(7) {
-			case 0:
-				steps = append(steps, "write a client hello")
-				_, err = conn.Write(visionClientHelloRecord())
-			case 1:
-				steps = append(steps, "write a handshake record")
-				_, err = conn.Write(visionHandshakeRecord())
-			case 2:
-				steps = append(steps, "write an application data record")
-				_, err = conn.Write(visionApplicationDataRecord())
-			case 3:
-				steps = append(steps, "write a handshake record and a large application data record at once")
-				_, err = conn.Write(visionHandshakeThenLargeApplicationData())
-			case 4:
-				if unread > 0 && !peerStalled {
-					steps = append(steps, "short read")
-					err = readSome(false)
-				}
-			case 5, 6:
-				if peerStalled {
-					continue
-				}
-				if unread > 0 {
-					steps = append(steps, "read what the peer sent before")
-					if err = readSome(true); err != nil {
-						break
-					}
-				}
-				switch peerCommand {
-				case commandPaddingContinue:
-					command := []byte{commandPaddingContinue, commandPaddingContinue, commandPaddingDirect, commandPaddingEnd}[random.Intn(4)]
-					content := visionApplicationDataRecord()
-					if command == commandPaddingContinue {
-						cipher := ciphers[random.Intn(len(ciphers))]
-						tls13 := random.Intn(5) != 0
-						content = visionServerHelloRecord(cipher, tls13)
-						steps = append(steps, fmt.Sprintf("peer sends a server hello cipher %#x tls13 %v", cipher, tls13))
-					} else {
-						steps = append(steps, fmt.Sprintf("peer sends a frame with command %d", command))
-					}
-					headerLen := 5
-					if peerFrames == 0 {
-						headerLen = 21
-					}
-					frame := visionTestFrame(peerFrames == 0, command, content, random.Intn(1400))
-					peerFrames++
-					switch {
-					case command == commandPaddingContinue && random.Intn(3) == 0:
-						split := headerLen + 79 + random.Intn(len(content)-79)
-						steps = append(steps, fmt.Sprintf("in two TLS records split at %d", split))
-						if _, err = pair.server.Write(frame[:split]); err == nil {
-							_, err = pair.server.Write(frame[split:])
-						}
-						unread += len(content)
-						if err == nil {
-							err = readSome(true)
-						}
-					case command != commandPaddingDirect && random.Intn(4) == 0:
-						split := 1 + random.Intn(len(frame)-1)
-						if peerFrames == 1 {
-							split = 21 + random.Intn(len(frame)-21)
-						} else if random.Intn(2) == 0 {
-							split = 1 + random.Intn(4)
-						}
-						steps = append(steps, fmt.Sprintf("only the first %d bytes arrive", split))
-						_, err = pair.server.Write(frame[:split])
-						peerStalled = true
-						for err == nil {
-							var n int
-							n, err = readVisionPeerContentWithin(conn, 1+random.Intn(64), 100*time.Millisecond)
-							unread -= n
-							if netErr, isNet := err.(net.Error); isNet && netErr.Timeout() {
-								err = nil
-								break
-							}
-						}
-					default:
-						_, err = pair.server.Write(frame)
-						unread += len(content)
-						if command == commandPaddingDirect {
-							unread += conn.input.Len() + conn.rawInput.Len()
-						}
-						if err == nil {
-							err = readSome(command == commandPaddingDirect || random.Intn(2) == 0)
-						}
-						if command == commandPaddingDirect && err == nil && !conn.directRead {
-							err = errors.New("the peer's direct frame did not switch the read side")
-						}
-					}
-					peerCommand = command
-				case commandPaddingDirect:
-					if unread > 0 {
-						continue
-					}
-					steps = append(steps, "peer sends raw bytes")
-					_, err = pair.serverRaw.Write(visionApplicationDataRecord())
-					unread += len(visionApplicationDataRecord())
-					if err == nil {
-						err = readSome(true)
-					}
-				case commandPaddingEnd:
-					steps = append(steps, "peer sends plain bytes")
-					_, err = pair.server.Write(visionApplicationDataRecord())
-					unread += len(visionApplicationDataRecord())
-					if err == nil {
-						err = readSome(random.Intn(2) == 0)
-					}
-				}
-			}
-			if err != nil {
-				t.Fatalf("iteration %d after %v: %v", iteration, steps, err)
-			}
-		}
-		if !peerStalled && unread > 0 && random.Intn(2) == 0 {
-			if err := readSome(true); err != nil {
-				t.Fatalf("iteration %d after %v: %v", iteration, steps, err)
-			}
-		}
-		if peerStalled || unread > 0 {
-			steps = append(steps, "close with peer data buffered in VisionConn or a peer frame cut short")
+		steps, err := driveVisionRealConn(random, pair, conn, visionDriveOptions{})
+		if err != nil {
+			t.Fatalf("iteration %d after %v: %v", iteration, steps, err)
 		}
 		direct, err := visionWroteADirectFrame(tlsSide.wrote)
 		if err != nil {
@@ -1461,7 +1501,7 @@ func TestVisionCloseDoesNotWaitForAWriteBlockedOnARealConn(t *testing.T) {
 					}
 				}
 			}()
-			if err = waitForAStuckWrite(writingSince, writeDone); err != nil {
+			if _, err = waitForAStuckWrite(writeDone, 200*time.Millisecond, writingSince); err != nil {
 				t.Fatal(err)
 			}
 			closeDone := make(chan error, 1)
@@ -1485,5 +1525,165 @@ func TestVisionCloseDoesNotWaitForAWriteBlockedOnARealConn(t *testing.T) {
 				t.Fatalf("client raw conn SetDeadline returned %v after Close, want net.ErrClosed", err)
 			}
 		})
+	}
+}
+
+func TestVisionCloseDoesNotWaitForAWriteStuckOnARealConnAcrossStates(t *testing.T) {
+	random := mathrand.New(mathrand.NewSource(20261105))
+	coverage := map[string]int{}
+	garbage := make([]byte, 64<<10)
+	for iteration := 0; iteration < 400; iteration++ {
+		underTLS := &visionRawWriteWatch{}
+		pair := newVisionTLSPairOver(t, func(conn net.Conn) net.Conn {
+			underTLS.Conn = conn
+			return underTLS
+		})
+		tlsSide := &visionPlaintextRecorder{Conn: pair.client}
+		rawSide := &visionRawWriteWatch{Conn: underTLS.Conn}
+		conn := newFreshVisionConn(tlsSide, rawSide)
+		drained := make(chan error, 1)
+		go func() {
+			_, err := io.Copy(io.Discard, pair.serverRaw)
+			drained <- err
+		}()
+		handshakeOnly := random.Intn(2) == 0
+		steps, err := driveVisionRealConn(random, pair, conn, visionDriveOptions{handshakeOnly: handshakeOnly, mayEndWithPeerDirect: true})
+		if handshakeOnly {
+			steps = append([]string{"the client writes no application data"}, steps...)
+		}
+		if err != nil {
+			t.Fatalf("iteration %d after %v: %v", iteration, steps, err)
+		}
+		direct, err := visionWroteADirectFrame(tlsSide.wrote)
+		if err != nil {
+			t.Fatalf("iteration %d after %v: %v", iteration, steps, err)
+		}
+		pair.serverRaw.SetReadDeadline(time.Now())
+		if err = <-drained; !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("iteration %d after %v: the peer stopped reading with %v", iteration, steps, err)
+		}
+		for filled := false; !filled; {
+			underTLS.Conn.SetWriteDeadline(time.Now().Add(20 * time.Millisecond))
+			n, fillErr := underTLS.Conn.Write(garbage)
+			if fillErr != nil && !errors.Is(fillErr, os.ErrDeadlineExceeded) {
+				t.Fatalf("iteration %d after %v: filling the socket ended with %v", iteration, steps, fillErr)
+			}
+			filled = n == 0
+		}
+		underTLS.Conn.SetWriteDeadline(time.Time{})
+		record := [][]byte{visionApplicationDataRecord(), visionHandshakeThenLargeApplicationData(), visionHandshakeRecord(), make([]byte, 8000)}[random.Intn(4)]
+		steps = append(steps, "the peer stops reading and the socket fills", fmt.Sprintf("write %d bytes starting %x", len(record), record[:3]))
+		writeDone := make(chan error, 1)
+		go func() {
+			_, writeErr := conn.Write(record)
+			writeDone <- writeErr
+		}()
+		stuckOn, err := waitForAStuckWrite(writeDone, 0, &underTLS.writingSince, &rawSide.writingSince)
+		if err != nil {
+			t.Fatalf("iteration %d after %v: %v", iteration, steps, err)
+		}
+		sides := []string{"TLS", "raw"}
+		wantStuckOn := 0
+		if direct {
+			wantStuckOn = 1
+		}
+		if stuckOn != wantStuckOn {
+			t.Fatalf("iteration %d after %v: the write got stuck on the %s conn, want the %s conn", iteration, steps, sides[stuckOn], sides[wantStuckOn])
+		}
+		closeDone := make(chan error, 1)
+		go func() {
+			closeDone <- conn.Close()
+		}()
+		select {
+		case err = <-closeDone:
+			if err != nil {
+				t.Fatalf("iteration %d after %v: Close returned %v", iteration, steps, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iteration %d after %v: Close waited for a write stuck on the %s conn", iteration, steps, sides[stuckOn])
+		}
+		select {
+		case err = <-writeDone:
+			if err == nil {
+				t.Fatalf("iteration %d after %v: the stuck write finished without an error after Close", iteration, steps)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iteration %d after %v: Close did not release the write stuck on the %s conn", iteration, steps, sides[stuckOn])
+		}
+		if err = pair.client.NetConn().SetDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("iteration %d after %v: the client raw conn is still open after Close: %v", iteration, steps, err)
+		}
+		if tcpConn, isTCP := pair.serverRaw.Conn.(*net.TCPConn); isTCP {
+			tcpConn.SetLinger(0)
+		}
+		pair.serverRaw.Close()
+		switching, err := visionWroteADirectFrame(tlsSide.wrote)
+		if err != nil {
+			t.Fatalf("iteration %d after %v: %v", iteration, steps, err)
+		}
+		switching = switching && !direct
+		switch {
+		case switching:
+			coverage["switching frame stuck on the TLS conn"]++
+			if conn.directRead {
+				coverage["switching frame stuck on the TLS conn after the peer's direct frame"]++
+			} else {
+				coverage["switching frame stuck on the TLS conn with the peer still padding"]++
+			}
+			if len(record) == len(visionHandshakeThenLargeApplicationData()) {
+				coverage["switching frame stuck on the TLS conn behind a handshake record"]++
+			}
+		case direct:
+			coverage["stuck on the raw conn"]++
+			if conn.directRead {
+				coverage["stuck on the raw conn after the peer's direct frame"]++
+			}
+		default:
+			coverage["stuck on the TLS conn"]++
+			if conn.numberOfPacketToFilter > 0 {
+				coverage["stuck on the TLS conn while filtering"]++
+			}
+			if conn.remainingContent != -1 {
+				coverage["stuck on the TLS conn after a peer frame"]++
+			}
+			if conn.currentCommand == commandPaddingContinue && conn.remainingContent != -1 {
+				coverage["stuck on the TLS conn after a peer Continue frame"]++
+			}
+			if !conn.isTLS12orAbove {
+				coverage["stuck on the TLS conn before a server hello"]++
+			}
+			if conn.cipher != 0 {
+				coverage["stuck on the TLS conn with the cipher known"]++
+			}
+			if conn.enableXTLS {
+				coverage["stuck on the TLS conn with XTLS on"]++
+			}
+			if !conn.isPadding {
+				coverage["stuck on the TLS conn after the padding ended"]++
+			}
+		}
+		if conn.input.Len() > 0 || conn.rawInput.Len() > 0 || len(conn.remainingBuffers) > 0 || conn.paddingHeaderLen > 0 {
+			coverage["stuck with peer data left in VisionConn or the TLS conn"]++
+		}
+	}
+	t.Logf("coverage %v", coverage)
+	for _, name := range []string{
+		"switching frame stuck on the TLS conn after the peer's direct frame",
+		"switching frame stuck on the TLS conn with the peer still padding",
+		"switching frame stuck on the TLS conn behind a handshake record",
+		"stuck on the raw conn",
+		"stuck on the raw conn after the peer's direct frame",
+		"stuck on the TLS conn while filtering",
+		"stuck on the TLS conn after a peer frame",
+		"stuck on the TLS conn after a peer Continue frame",
+		"stuck on the TLS conn before a server hello",
+		"stuck on the TLS conn with the cipher known",
+		"stuck on the TLS conn with XTLS on",
+		"stuck on the TLS conn after the padding ended",
+		"stuck with peer data left in VisionConn or the TLS conn",
+	} {
+		if coverage[name] == 0 {
+			t.Fatalf("the generated states never reached %q: %v", name, coverage)
+		}
 	}
 }
