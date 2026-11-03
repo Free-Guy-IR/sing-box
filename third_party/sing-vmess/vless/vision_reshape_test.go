@@ -70,6 +70,7 @@ func TestReshapeBufferSplitsAtTheExpectedOffsets(t *testing.T) {
 		{"record header at offset 32", reshapeInput(9000, 32), []int{32, 4096, 4872}},
 		{"exactly the limit without a record header", reshapeInput(visionReshapeLimit), []int{4096, visionReshapeLimit - 4096}},
 		{"two record headers split at the last one", reshapeInput(9000, 100, 5000), []int{5000, 4000}},
+		{"last record header past the limit beats an earlier one", reshapeInput(9000, 100, 8500), []int{4096, 4904}},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
