@@ -57,6 +57,37 @@ func TestReshapeBufferKeepsEveryPieceWithinTheVisionLimit(t *testing.T) {
 	}
 }
 
+func TestReshapeBufferSplitsAtTheExpectedOffsets(t *testing.T) {
+	testCases := []struct {
+		name  string
+		input []byte
+		want  []int
+	}{
+		{"record header one byte past the limit", reshapeInput(9000, visionReshapeLimit+1), []int{4096, 4904}},
+		{"record header at the limit", reshapeInput(9000, visionReshapeLimit), []int{visionReshapeLimit, 9000 - visionReshapeLimit}},
+		{"record header at offset 5", reshapeInput(9000, 5), []int{4096, 4904}},
+		{"record header at offset 31", reshapeInput(9000, 31), []int{4096, 4904}},
+		{"record header at offset 32", reshapeInput(9000, 32), []int{32, 4096, 4872}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			pieces := reshapeBuffer(testCase.input)
+			lengths := make([]int, 0, len(pieces))
+			for _, piece := range pieces {
+				lengths = append(lengths, piece.Len())
+			}
+			if len(lengths) != len(testCase.want) {
+				t.Fatalf("reshapeBuffer(%d bytes) gave pieces %v, want %v", len(testCase.input), lengths, testCase.want)
+			}
+			for i := range lengths {
+				if lengths[i] != testCase.want[i] {
+					t.Fatalf("reshapeBuffer(%d bytes) gave pieces %v, want %v", len(testCase.input), lengths, testCase.want)
+				}
+			}
+		})
+	}
+}
+
 func TestPaddedLargeWriteSurvivesTheVisionFraming(t *testing.T) {
 	userUUID := [16]byte{0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c}
 	writer := &VisionConn{logger: logger.NOP(), userUUID: userUUID, writeUUID: true}

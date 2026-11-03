@@ -112,8 +112,12 @@ func TestEmptyChunkWriteDoesNotEndThePeerStream(t *testing.T) {
 		t.Run(pair.name+"/WriteBuffer", func(t *testing.T) {
 			var wire bytes.Buffer
 			writer := pair.writer(&wire)
-			if err := writer.WriteBuffer(chunkBuffer(nil)); err != nil {
+			empty := chunkBuffer(nil)
+			if err := writer.WriteBuffer(empty); err != nil {
 				t.Fatalf("empty WriteBuffer returned %v, want nil", err)
+			}
+			if empty.Cap() != 0 {
+				t.Fatalf("empty WriteBuffer kept its buffer (cap %d), want it released", empty.Cap())
 			}
 			emptyFrame := wire.Len()
 			if err := writer.WriteBuffer(chunkBuffer(payload)); err != nil {
