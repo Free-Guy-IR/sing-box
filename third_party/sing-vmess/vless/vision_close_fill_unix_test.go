@@ -17,17 +17,39 @@ func newVisionUnixStreamConns(t *testing.T) (net.Conn, net.Conn) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conns := make([]net.Conn, len(fds))
-	for index, fd := range fds {
-		file := os.NewFile(uintptr(fd), "vision-unix-stream")
-		conns[index], err = net.FileConn(file)
-		file.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { conns[index].Close() })
+	first, err := visionUnixStreamConn(fds[0])
+	if err != nil {
+		syscall.Close(fds[1])
+		t.Fatal(err)
 	}
-	return conns[0], conns[1]
+	t.Cleanup(func() { first.Close() })
+	second, err := visionUnixStreamConn(fds[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { second.Close() })
+	return first, second
+}
+
+func visionUnixStreamConn(fd int) (net.Conn, error) {
+	file := os.NewFile(uintptr(fd), "vision-unix-stream")
+	defer file.Close()
+	return net.FileConn(file)
+}
+
+func TestVisionUnixStreamConnsCleanupClosesBothEnds(t *testing.T) {
+	var first, second net.Conn
+	t.Run("pair", func(t *testing.T) {
+		first, second = newVisionUnixStreamConns(t)
+	})
+	for name, conn := range map[string]net.Conn{"first": first, "second": second} {
+		if _, err := conn.Write([]byte{0}); !errors.Is(err, net.ErrClosed) {
+			t.Errorf("write on the %s end after the cleanups returned %v, want %v", name, err, net.ErrClosed)
+		}
+		if err := conn.Close(); !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close of the %s end after the cleanups returned %v, want %v", name, err, net.ErrClosed)
+		}
+	}
 }
 
 func fillVisionStreamSocket(conn net.Conn) error {
