@@ -15,7 +15,7 @@ import (
 	mathrand "math/rand"
 	"net"
 	"os"
-	"strings"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -102,7 +102,12 @@ func newVisionTLSPair(t *testing.T) visionTLSPair {
 
 func newVisionTLSPairOver(t *testing.T, wrapClientRaw func(net.Conn) net.Conn) visionTLSPair {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	return newVisionTLSPairOn(t, "tcp", "127.0.0.1:0", wrapClientRaw)
+}
+
+func newVisionTLSPairOn(t *testing.T, network string, address string, wrapClientRaw func(net.Conn) net.Conn) visionTLSPair {
+	t.Helper()
+	listener, err := net.Listen(network, address)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +122,7 @@ func newVisionTLSPairOver(t *testing.T, wrapClientRaw func(net.Conn) net.Conn) v
 		}
 		accepted <- conn
 	}()
-	clientRaw, err := net.Dial("tcp", listener.Addr().String())
+	clientRaw, err := net.Dial(network, listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,19 +332,20 @@ func TestVisionCloseBeforeDirectWriteSendsCloseNotify(t *testing.T) {
 }
 
 type visionCloseRecorder struct {
-	closed     atomic.Int32
-	written    atomic.Int64
-	closeErr   error
-	readData   []byte
-	maxRead    int
-	wrote      []byte
-	blockWrite bool
-	blocked    chan struct{}
-	release    chan struct{}
-	onWrite    func([]byte)
-	halfClosed atomic.Int32
-	closeOnce  sync.Once
-	done       chan struct{}
+	closed      atomic.Int32
+	written     atomic.Int64
+	closeErr    error
+	readData    []byte
+	maxRead     int
+	wrote       []byte
+	blockWrite  bool
+	blocked     chan struct{}
+	blockedOnce sync.Once
+	release     chan struct{}
+	onWrite     func([]byte)
+	halfClosed  atomic.Int32
+	closeOnce   sync.Once
+	done        chan struct{}
 }
 
 func (c *visionCloseRecorder) Read(p []byte) (int, error) {
@@ -359,7 +365,7 @@ func (c *visionCloseRecorder) Write(p []byte) (int, error) {
 		c.onWrite(p)
 	}
 	if c.blockWrite {
-		close(c.blocked)
+		c.blockedOnce.Do(func() { close(c.blocked) })
 		if c.release != nil {
 			<-c.release
 		} else {
@@ -457,6 +463,12 @@ func TestVisionCloseFollowsTheDirectWrite(t *testing.T) {
 			}
 			if tlsSide.closed.Load() != testCase.wantTLS || rawSide.closed.Load() != testCase.wantRaw {
 				t.Fatalf("Close closed tls=%d raw=%d, want tls=%d raw=%d", tlsSide.closed.Load(), rawSide.closed.Load(), testCase.wantTLS, testCase.wantRaw)
+			}
+			if err := conn.Close(); !errors.Is(err, testCase.wantErr) {
+				t.Fatalf("the second Close returned %v, want %v", err, testCase.wantErr)
+			}
+			if tlsSide.closed.Load() != 2*testCase.wantTLS || rawSide.closed.Load() != 2*testCase.wantRaw {
+				t.Fatalf("two Close calls closed tls=%d raw=%d, want tls=%d raw=%d", tlsSide.closed.Load(), rawSide.closed.Load(), 2*testCase.wantTLS, 2*testCase.wantRaw)
 			}
 		})
 	}
@@ -597,16 +609,26 @@ func TestVisionCloseDuringTheTrailingDirectWrite(t *testing.T) {
 }
 
 func TestVisionCloseDuringTheSwitchingFrameWrite(t *testing.T) {
+	inThePeerPadding := len(visionCloseTestUUID) + 5 + len(visionApplicationDataRecord()) + 10
 	for _, testCase := range []struct {
 		name      string
 		peerFrame []byte
 		write     []byte
+		reached   func(conn *VisionConn) bool
 	}{
 		{name: "with the peer still padding", write: visionApplicationDataRecord()},
 		{name: "after the peer's padded frame", peerFrame: visionPeerFrame(commandPaddingContinue), write: visionApplicationDataRecord()},
 		{name: "after the peer's direct frame", peerFrame: visionPeerFrame(commandPaddingDirect), write: visionApplicationDataRecord()},
 		{name: "with a handshake record ahead of the switching record", write: visionHandshakeThenLargeApplicationData()},
-		{name: "with a split peer padding header", peerFrame: append(visionPeerFrame(commandPaddingContinue), commandPaddingContinue, 0x00, 0x09), write: visionApplicationDataRecord()},
+		{name: "with a split peer padding header", peerFrame: append(visionPeerFrame(commandPaddingContinue), commandPaddingContinue, 0x00, 0x09), write: visionApplicationDataRecord(), reached: func(conn *VisionConn) bool {
+			return conn.paddingHeaderLen > 0
+		}},
+		{name: "after the peer's padding end frame", peerFrame: visionPeerFrame(commandPaddingEnd), write: visionApplicationDataRecord(), reached: func(conn *VisionConn) bool {
+			return conn.currentCommand == commandPaddingEnd && !conn.withinPaddingBuffers
+		}},
+		{name: "in the middle of the peer's padding", peerFrame: visionPeerFrame(commandPaddingContinue)[:inThePeerPadding], write: visionApplicationDataRecord(), reached: func(conn *VisionConn) bool {
+			return conn.withinPaddingBuffers && conn.remainingContent == 0 && conn.remainingPadding > 0
+		}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			conn, tlsSide, _ := newRecordedVisionConn()
@@ -616,8 +638,8 @@ func TestVisionCloseDuringTheSwitchingFrameWrite(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if strings.Contains(testCase.name, "split peer padding header") && conn.paddingHeaderLen == 0 {
-				t.Fatal("the peer padding header is not split")
+			if testCase.reached != nil && !testCase.reached(conn) {
+				t.Fatalf("the peer frame left currentCommand=%d withinPaddingBuffers=%v remainingContent=%d remainingPadding=%d paddingHeaderLen=%d, not the state under test", conn.currentCommand, conn.withinPaddingBuffers, conn.remainingContent, conn.remainingPadding, conn.paddingHeaderLen)
 			}
 			var closeErr error
 			var closeCalled bool
@@ -1586,10 +1608,15 @@ func TestVisionCloseDoesNotWaitForAWriteBlockedOnARealConn(t *testing.T) {
 func TestVisionCloseDoesNotWaitForAWriteStuckOnARealConnAcrossStates(t *testing.T) {
 	random := mathrand.New(mathrand.NewSource(20261105))
 	coverage := map[string]int{}
-	garbage := make([]byte, 64<<10)
+	socketDir, err := os.MkdirTemp("", "vision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "s")
 	for iteration := 0; iteration < 400; iteration++ {
 		underTLS := &visionRawWriteWatch{}
-		pair := newVisionTLSPairOver(t, func(conn net.Conn) net.Conn {
+		pair := newVisionTLSPairOn(t, "unix", socketPath, func(conn net.Conn) net.Conn {
 			underTLS.Conn = conn
 			return underTLS
 		})
@@ -1623,15 +1650,9 @@ func TestVisionCloseDoesNotWaitForAWriteStuckOnARealConnAcrossStates(t *testing.
 		if err = <-drained; !errors.Is(err, os.ErrDeadlineExceeded) {
 			t.Fatalf("iteration %d after %v: the peer stopped reading with %v", iteration, steps, err)
 		}
-		for filled := false; !filled; {
-			underTLS.Conn.SetWriteDeadline(time.Now().Add(20 * time.Millisecond))
-			n, fillErr := underTLS.Conn.Write(garbage)
-			if fillErr != nil && !errors.Is(fillErr, os.ErrDeadlineExceeded) {
-				t.Fatalf("iteration %d after %v: filling the socket ended with %v", iteration, steps, fillErr)
-			}
-			filled = n == 0
+		if err = fillVisionStreamSocket(underTLS.Conn); err != nil {
+			t.Fatalf("iteration %d after %v: filling the socket ended with %v", iteration, steps, err)
 		}
-		underTLS.Conn.SetWriteDeadline(time.Time{})
 		record := records[random.Intn(len(records))]
 		steps = append(steps, "the peer stops reading and the socket fills", fmt.Sprintf("write %d bytes starting %x", len(record), record[:3]))
 		writeDone := make(chan error, 1)
@@ -1673,9 +1694,6 @@ func TestVisionCloseDoesNotWaitForAWriteStuckOnARealConnAcrossStates(t *testing.
 		}
 		if err = pair.client.NetConn().SetDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
 			t.Fatalf("iteration %d after %v: the client raw conn is still open after Close: %v", iteration, steps, err)
-		}
-		if tcpConn, isTCP := pair.serverRaw.Conn.(*net.TCPConn); isTCP {
-			tcpConn.SetLinger(0)
 		}
 		pair.serverRaw.Close()
 		switching, err := visionWroteADirectFrame(tlsSide.wrote)
