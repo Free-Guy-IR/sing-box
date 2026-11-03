@@ -14,5 +14,5 @@ func newVisionUnixStreamConns(t *testing.T) (net.Conn, net.Conn) {
 }
 
 func fillVisionStreamSocket(conn net.Conn) error {
-	return errors.ErrUnsupported
+	return errors.New("a stuck write needs a Unix stream socket")
 }

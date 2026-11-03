@@ -39,9 +39,11 @@ func visionUnixStreamConn(fd int) (net.Conn, error) {
 
 func TestVisionUnixStreamConnsCleanupClosesBothEnds(t *testing.T) {
 	var first, second net.Conn
-	t.Run("pair", func(t *testing.T) {
+	if !t.Run("pair", func(t *testing.T) {
 		first, second = newVisionUnixStreamConns(t)
-	})
+	}) {
+		t.FailNow()
+	}
 	for name, conn := range map[string]net.Conn{"first": first, "second": second} {
 		if _, err := conn.Write([]byte{0}); !errors.Is(err, net.ErrClosed) {
 			t.Errorf("write on the %s end after the cleanups returned %v, want %v", name, err, net.ErrClosed)
