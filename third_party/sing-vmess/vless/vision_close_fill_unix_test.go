@@ -6,8 +6,29 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"syscall"
+	"testing"
 )
+
+func newVisionUnixStreamConns(t *testing.T) (net.Conn, net.Conn) {
+	t.Helper()
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conns := make([]net.Conn, len(fds))
+	for index, fd := range fds {
+		file := os.NewFile(uintptr(fd), "vision-unix-stream")
+		conns[index], err = net.FileConn(file)
+		file.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conns[index].Close() })
+	}
+	return conns[0], conns[1]
+}
 
 func fillVisionStreamSocket(conn net.Conn) error {
 	syscallConn, isSyscallConn := conn.(syscall.Conn)

@@ -15,7 +15,6 @@ import (
 	mathrand "math/rand"
 	"net"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -102,12 +101,7 @@ func newVisionTLSPair(t *testing.T) visionTLSPair {
 
 func newVisionTLSPairOver(t *testing.T, wrapClientRaw func(net.Conn) net.Conn) visionTLSPair {
 	t.Helper()
-	return newVisionTLSPairOn(t, "tcp", "127.0.0.1:0", wrapClientRaw)
-}
-
-func newVisionTLSPairOn(t *testing.T, network string, address string, wrapClientRaw func(net.Conn) net.Conn) visionTLSPair {
-	t.Helper()
-	listener, err := net.Listen(network, address)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +116,7 @@ func newVisionTLSPairOn(t *testing.T, network string, address string, wrapClient
 		}
 		accepted <- conn
 	}()
-	clientRaw, err := net.Dial(network, listener.Addr().String())
+	clientRaw, err := net.Dial("tcp", listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +127,11 @@ func newVisionTLSPairOn(t *testing.T, network string, address string, wrapClient
 		clientRaw.Close()
 		t.Fatal(err)
 	}
+	return newVisionTLSPairFrom(t, clientRaw, serverConn, wrapClientRaw)
+}
+
+func newVisionTLSPairFrom(t *testing.T, clientRaw net.Conn, serverConn net.Conn, wrapClientRaw func(net.Conn) net.Conn) visionTLSPair {
+	t.Helper()
 	t.Cleanup(func() {
 		clientRaw.Close()
 		serverConn.Close()
@@ -158,10 +157,10 @@ func newVisionTLSPairOn(t *testing.T, network string, address string, wrapClient
 	go func() {
 		serverHandshake <- server.Handshake()
 	}()
-	if err = client.Handshake(); err != nil {
+	if err := client.Handshake(); err != nil {
 		t.Fatal(err)
 	}
-	if err = <-serverHandshake; err != nil {
+	if err := <-serverHandshake; err != nil {
 		t.Fatal(err)
 	}
 	return visionTLSPair{client: client, server: server, serverRaw: serverRaw}
@@ -1608,15 +1607,10 @@ func TestVisionCloseDoesNotWaitForAWriteBlockedOnARealConn(t *testing.T) {
 func TestVisionCloseDoesNotWaitForAWriteStuckOnARealConnAcrossStates(t *testing.T) {
 	random := mathrand.New(mathrand.NewSource(20261105))
 	coverage := map[string]int{}
-	socketDir, err := os.MkdirTemp("", "vision")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(socketDir) })
-	socketPath := filepath.Join(socketDir, "s")
 	for iteration := 0; iteration < 400; iteration++ {
 		underTLS := &visionRawWriteWatch{}
-		pair := newVisionTLSPairOn(t, "unix", socketPath, func(conn net.Conn) net.Conn {
+		clientRaw, serverConn := newVisionUnixStreamConns(t)
+		pair := newVisionTLSPairFrom(t, clientRaw, serverConn, func(conn net.Conn) net.Conn {
 			underTLS.Conn = conn
 			return underTLS
 		})
